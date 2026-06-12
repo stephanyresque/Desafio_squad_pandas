@@ -2,6 +2,7 @@
 
 import {
   CartesianGrid,
+  Legend,
   Line,
   LineChart,
   ResponsiveContainer,
@@ -12,7 +13,8 @@ import {
 
 export type LoadChartPoint = {
   ts: string;
-  load_mw: number;
+  verificada: number | null;
+  programada: number | null;
 };
 
 type LoadChartProps = {
@@ -27,11 +29,18 @@ function formatTs(ts: string): string {
   return `${day}/${month} ${hour}:00`;
 }
 
+function formatMw(value: number | string | null | undefined): string {
+  if (value == null) {
+    return "—";
+  }
+  return `${Number(value).toLocaleString("pt-BR")} MWmed`;
+}
+
 export default function LoadChart({ data }: LoadChartProps) {
   return (
     <div className="w-full">
       <h1 className="mb-6 text-xl font-semibold text-zinc-900 dark:text-zinc-50">
-        Carga verificada — SE/CO (MWmed)
+        Carga SE/CO: real × programada ONS (MWmed)
       </h1>
       <ResponsiveContainer width="100%" height={420}>
         <LineChart data={data} margin={{ top: 8, right: 16, left: 8, bottom: 8 }}>
@@ -56,17 +65,27 @@ export default function LoadChart({ data }: LoadChartProps) {
           />
           <Tooltip
             labelFormatter={(label) => formatTs(String(label))}
-            formatter={(value) => [
-              `${Number(value).toLocaleString("pt-BR")} MWmed`,
-              "Carga",
-            ]}
+            formatter={(value, name) => [formatMw(value), String(name)]}
           />
+          <Legend />
           <Line
             type="monotone"
-            dataKey="load_mw"
+            name="Real"
+            dataKey="verificada"
             stroke="#2563eb"
             strokeWidth={2}
             dot={false}
+            connectNulls
+            activeDot={{ r: 4 }}
+          />
+          <Line
+            type="monotone"
+            name="Programada"
+            dataKey="programada"
+            stroke="#f59e0b"
+            strokeWidth={2}
+            dot={false}
+            connectNulls
             activeDot={{ r: 4 }}
           />
         </LineChart>
