@@ -65,7 +65,10 @@ export default function LoadChart({ data }: LoadChartProps) {
           />
           <Tooltip
             labelFormatter={(label) => formatTs(String(label))}
-            formatter={(value, name) => [formatMw(value), String(name)]}
+            formatter={(value, name) => [
+              formatMw(Array.isArray(value) ? value[0] : value),
+              String(name),
+            ]}
           />
           <Legend />
           <Line
