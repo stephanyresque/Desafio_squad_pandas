@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+env/
+# dados locais
+ons_explore/
+# Node / Next
+node_modules/
+.next/
+# segredos
+.env
+.env.local
