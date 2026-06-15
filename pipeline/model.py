@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import os
+import pathlib
 import subprocess
 import sys
 import warnings
@@ -144,6 +145,12 @@ def subsystem_id(conn, codigo: str) -> int:
     return int(row[0])
 
 
+def br_holidays_for_index(idx: pd.DatetimeIndex):
+    """Feriados nacionais BR cobrindo os anos do índice (+1 de buffer p/ véspera/virada)."""
+    anos = range(idx.year.min() - 1, idx.year.max() + 2)
+    return holidays.country_holidays("BR", years=anos)
+
+
 # ---------------------------------------------------------------------------
 # Features — PISO DE 24h em toda feature de carga
 # ---------------------------------------------------------------------------
@@ -174,8 +181,7 @@ def build_features(actual: pd.Series) -> pd.DataFrame:
     feat["month"] = idx.month
     feat["is_weekend"] = (idx.dayofweek >= 5).astype(int)
 
-    anos = range(idx.year.min() - 1, idx.year.max() + 2)
-    br = holidays.country_holidays("BR", years=anos)
+    br = br_holidays_for_index(idx)
     dias = idx.normalize()
     feat["is_holiday"] = [1 if d.date() in br else 0 for d in dias]
     feat["is_pre_holiday"] = [
@@ -273,7 +279,94 @@ def fit_served_ridge(X: pd.DataFrame, y: pd.Series) -> tuple[dict, pd.Timestamp,
         "train_start": str(yv.index.min().date()),
         "train_end": str(yv.index.max().date()),
     }
-    return artifact, yv.index.max(), int(valid.sum())
+    return pipe, artifact, yv.index.max(), int(valid.sum())
+
+
+# ---------------------------------------------------------------------------
+# Casos de referência p/ paridade TS (emitidos junto do served ridge)
+# ---------------------------------------------------------------------------
+PIPELINE_DIR = pathlib.Path(__file__).resolve().parent
+
+
+def build_history_for_target(actual: pd.Series, t: pd.Timestamp) -> dict[str, float]:
+    """Histórico que a feature engineering precisa: offsets 24..191h antes de t.
+
+    É a união exata do que as 20 features de carga enxergam (lags 24/48/168, médias/
+    desvios móveis terminando em t−24h, mesma-hora-7d). Embutir isso torna o teste de
+    paridade auto-contido — o TS recomputa as features só a partir daqui, sem DB nem Python.
+    """
+    hist = {}
+    for off in range(24, 192):
+        ts = t - pd.Timedelta(hours=off)
+        hist[ts.isoformat()] = float(actual.loc[ts])
+    return hist
+
+
+def select_parity_targets(X: pd.DataFrame, actual: pd.Series) -> list[tuple[str, pd.Timestamp]]:
+    """~10 horas-alvo variadas (madrugada/pico, útil/fim de semana, feriado e véspera)."""
+    valid = X.notna().all(axis=1) & actual.notna()
+    idx = X.index[valid]
+    idx = idx[idx >= TEST_START]
+    feat = X.loc[idx]
+
+    def first(mask: pd.Series):
+        sel = idx[mask.to_numpy()]
+        return sel[0] if len(sel) else None
+
+    candidates = [
+        ("weekday_dawn", (feat.hour == 3) & (feat.is_weekend == 0)),
+        ("weekday_peak", (feat.hour == 19) & (feat.is_weekend == 0)),
+        ("weekend_dawn", (feat.hour == 3) & (feat.is_weekend == 1)),
+        ("weekend_peak", (feat.hour == 19) & (feat.is_weekend == 1)),
+        ("pre_holiday", feat.is_pre_holiday == 1),
+        ("holiday", feat.is_holiday == 1),
+        ("midday_aug", (feat.hour == 12) & (feat.month == 8)),
+        ("evening_nov", (feat.hour == 21) & (feat.month == 11)),
+        ("morning_jan", (feat.hour == 7) & (feat.month == 1)),
+        ("midnight_mar", (feat.hour == 0) & (feat.month == 3)),
+    ]
+    out: list[tuple[str, pd.Timestamp]] = []
+    seen: set = set()
+    for label, mask in candidates:
+        t = first(mask)
+        if t is not None and t not in seen:
+            seen.add(t)
+            out.append((label, t))
+    return out
+
+
+def emit_reference_files(
+    X: pd.DataFrame, actual: pd.Series, pipe, artifact: dict
+) -> tuple[int, int]:
+    targets = select_parity_targets(X, actual)
+    cases = []
+    for label, t in targets:
+        feats = [float(v) for v in X.loc[t].to_numpy()]  # já na ORDEM de FEATURES/artifact
+        yhat = float(pipe.predict(X.loc[[t]].to_numpy())[0])
+        cases.append(
+            {
+                "label": label,
+                "target_ts": t.isoformat(),
+                "features": feats,
+                "yhat": yhat,
+                "history": build_history_for_target(actual, t),
+            }
+        )
+    parity = {
+        "artifact": artifact,
+        "feature_order": artifact["features"],
+        "cases": cases,
+    }
+    (PIPELINE_DIR / "parity_cases.json").write_text(
+        json.dumps(parity, indent=2), encoding="utf-8"
+    )
+
+    br = br_holidays_for_index(actual.index)
+    dates = sorted(d.isoformat() for d in br.keys())
+    (PIPELINE_DIR / "holidays_br.json").write_text(
+        json.dumps(dates, indent=2), encoding="utf-8"
+    )
+    return len(cases), len(dates)
 
 
 # ---------------------------------------------------------------------------
@@ -461,8 +554,11 @@ def main() -> None:
         t0, t1 = test_df.index.min(), test_df.index.max()
 
         # Ridge servido (treino em todo o histórico)
-        artifact, served_end, _ = fit_served_ridge(X, y)
+        pipe_served, artifact, served_end, _ = fit_served_ridge(X, y)
         artifact_bytes = len(json.dumps(artifact))
+
+        # Casos de referência + lista de feriados p/ a paridade TS
+        n_cases, n_holidays = emit_reference_files(X, actual, pipe_served, artifact)
 
         commit = git_commit()
         train_end_bt = month_origins(TEST_START, y.index.max())[-1].date()
@@ -534,6 +630,10 @@ def main() -> None:
             f"Gravado: ridge_v1(run={run_ridge}, preds={ridge_pred.dropna().shape[0]}, evals=9) | "
             f"lgbm_v1(run={run_lgbm}, preds={lgbm_pred.dropna().shape[0]}, evals=3) | "
             f"ridge_v1_served(run={run_served}, artifact gravado)"
+        )
+        print(
+            f"Referência p/ paridade TS: pipeline/parity_cases.json ({n_cases} casos) | "
+            f"pipeline/holidays_br.json ({n_holidays} feriados)"
         )
     finally:
         conn.close()
