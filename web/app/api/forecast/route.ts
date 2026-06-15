@@ -14,7 +14,9 @@ import type { ForecastPoint, ServedArtifact } from "@/lib/forecast/types";
 
 export const dynamic = "force-dynamic";
 
-const SERVED_MODEL = "ridge_v1_served";
+// Modelo servido por subsistema: ridge_v1_served_<SUBSISTEMA> (ex.: ridge_v1_served_SECO,
+// ridge_v1_served_S). Um modelo por subsistema — servir o S não depende do SECO.
+const SERVED_MODEL_BASE = "ridge_v1_served";
 const HOLIDAYS = new Set<string>(holidaysBr as string[]);
 
 // histórico necessário: das 24 horas-alvo, a primeira (00:00) precisa de até t−191h,
@@ -45,11 +47,12 @@ export async function GET(request: Request) {
 
   const supabase = createClient();
 
-  // 1) Artifact do Ridge servido
+  // 1) Artifact do Ridge servido DESTE subsistema
+  const servedModel = `${SERVED_MODEL_BASE}_${subsystem}`;
   const artifactResult = await supabase
     .from("model_runs")
     .select("id, artifact")
-    .eq("model_name", SERVED_MODEL)
+    .eq("model_name", servedModel)
     .order("trained_at", { ascending: false })
     .limit(1)
     .maybeSingle();
@@ -63,7 +66,7 @@ export async function GET(request: Request) {
   const artifact = artifactResult.data?.artifact as ServedArtifact | undefined;
   if (!artifact) {
     return NextResponse.json(
-      { error: `Modelo servido '${SERVED_MODEL}' não encontrado.` },
+      { error: `Modelo servido '${servedModel}' não encontrado.` },
       { status: 404 },
     );
   }
@@ -144,7 +147,7 @@ export async function GET(request: Request) {
     target_date: `${target.year}-${String(target.month).padStart(2, "0")}-${String(
       target.day,
     ).padStart(2, "0")}`,
-    model_name: SERVED_MODEL,
+    model_name: servedModel,
     model_run_id: modelRunId,
     horizon_h: artifact.horizon_h,
     leakage_floor_h: artifact.leakage_floor_h,

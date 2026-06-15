@@ -27,6 +27,7 @@ Uso: python pipeline/model.py
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import pathlib
@@ -52,12 +53,17 @@ from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
 BRASILIA = timezone(timedelta(hours=-3))
-CODIGO = "SECO"
+DEFAULT_CODIGO = "SECO"
 HORIZON_H = 24
 
-RIDGE_NAME = "ridge_v1"
-LGBM_NAME = "lgbm_v1"
-SERVED_NAME = "ridge_v1_served"
+# Nomes de run são SUFIXADOS pelo subsistema (ex.: ridge_v1_SECO, ridge_v1_S) — um modelo
+# por subsistema. Sem isso, treinar o S sobrescreveria/apagaria os runs do SECO (model_runs
+# não tem coluna de subsistema; a idempotência e a /api/forecast casam pelo model_name).
+RIDGE_BASE = "ridge_v1"
+LGBM_BASE = "lgbm_v1"
+SERVED_BASE = "ridge_v1_served"
+# Só este subsistema emite os arquivos de referência de paridade (parity_cases.json).
+PARITY_CODIGO = "SECO"
 
 RIDGE_ALPHA = 1.0
 LGBM_PARAMS = {
@@ -251,7 +257,9 @@ def walk_forward(
 # ---------------------------------------------------------------------------
 # Ridge servido — treino em TODO o histórico, artifact JSON p/ inferência em TS
 # ---------------------------------------------------------------------------
-def fit_served_ridge(X: pd.DataFrame, y: pd.Series) -> tuple[dict, pd.Timestamp, int]:
+def fit_served_ridge(
+    X: pd.DataFrame, y: pd.Series, codigo: str
+) -> tuple[object, dict, pd.Timestamp, int]:
     valid = X.notna().all(axis=1) & y.notna()
     Xv = X.loc[valid]
     yv = y.loc[valid]
@@ -265,7 +273,7 @@ def fit_served_ridge(X: pd.DataFrame, y: pd.Series) -> tuple[dict, pd.Timestamp,
     artifact = {
         "model": "ridge",
         "alpha": RIDGE_ALPHA,
-        "subsystem": CODIGO,
+        "subsystem": codigo,
         "target": "load_mw",
         "horizon_h": HORIZON_H,
         "leakage_floor_h": 24,
@@ -499,6 +507,21 @@ def report(
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Backtest walk-forward + Ridge servido, por subsistema."
+    )
+    parser.add_argument(
+        "--codigo",
+        default=DEFAULT_CODIGO,
+        help="cod_areacarga do subsistema (padrão: SECO).",
+    )
+    args = parser.parse_args()
+    codigo = args.codigo
+
+    ridge_name = f"{RIDGE_BASE}_{codigo}"
+    lgbm_name = f"{LGBM_BASE}_{codigo}"
+    served_name = f"{SERVED_BASE}_{codigo}"
+
     database_url = os.environ.get("DATABASE_URL")
     if not database_url:
         print("DATABASE_URL não definida.", file=sys.stderr)
@@ -506,9 +529,9 @@ def main() -> None:
 
     conn = psycopg2.connect(database_url)
     try:
-        sub_id = subsystem_id(conn, CODIGO)
-        actual_raw = fetch_series(conn, "load_actual", CODIGO)
-        prog_raw = fetch_series(conn, "load_official_forecast", CODIGO)
+        sub_id = subsystem_id(conn, codigo)
+        actual_raw = fetch_series(conn, "load_actual", codigo)
+        prog_raw = fetch_series(conn, "load_official_forecast", codigo)
 
         full_idx = pd.date_range(
             actual_raw.index.min().floor("h"),
@@ -554,11 +577,15 @@ def main() -> None:
         t0, t1 = test_df.index.min(), test_df.index.max()
 
         # Ridge servido (treino em todo o histórico)
-        pipe_served, artifact, served_end, _ = fit_served_ridge(X, y)
+        pipe_served, artifact, served_end, _ = fit_served_ridge(X, y, codigo)
         artifact_bytes = len(json.dumps(artifact))
 
-        # Casos de referência + lista de feriados p/ a paridade TS
-        n_cases, n_holidays = emit_reference_files(X, actual, pipe_served, artifact)
+        # Casos de referência + feriados p/ a paridade TS — só o subsistema de referência
+        # (evita sobrescrever o parity_cases.json do SECO ao treinar outros subsistemas).
+        if codigo == PARITY_CODIGO:
+            n_cases, n_holidays = emit_reference_files(X, actual, pipe_served, artifact)
+        else:
+            n_cases, n_holidays = 0, 0
 
         commit = git_commit()
         train_end_bt = month_origins(TEST_START, y.index.max())[-1].date()
@@ -595,10 +622,10 @@ def main() -> None:
         }
 
         with conn.cursor() as cur:
-            delete_prior_runs(cur, [RIDGE_NAME, LGBM_NAME, SERVED_NAME])
+            delete_prior_runs(cur, [ridge_name, lgbm_name, served_name])
 
             run_ridge = insert_run(
-                cur, RIDGE_NAME, ridge_hp, None, TRAIN_START.date(), train_end_bt, commit
+                cur, ridge_name, ridge_hp, None, TRAIN_START.date(), train_end_bt, commit
             )
             insert_predictions(cur, run_ridge, sub_id, ridge_pred)
             insert_evaluations(
@@ -609,14 +636,14 @@ def main() -> None:
             )
 
             run_lgbm = insert_run(
-                cur, LGBM_NAME, lgbm_hp, None, TRAIN_START.date(), train_end_bt, commit
+                cur, lgbm_name, lgbm_hp, None, TRAIN_START.date(), train_end_bt, commit
             )
             insert_predictions(cur, run_lgbm, sub_id, lgbm_pred)
             insert_evaluations(cur, run_lgbm, sub_id, {"lgbm": evals["lgbm"]})
 
             run_served = insert_run(
                 cur,
-                SERVED_NAME,
+                served_name,
                 served_hp,
                 artifact,
                 TRAIN_START.date(),
@@ -625,16 +652,18 @@ def main() -> None:
             )
         conn.commit()
 
+        print(f"\n=== Subsistema {codigo} ===")
         report(evals, n, t0, t1, artifact, artifact_bytes)
         print(
-            f"Gravado: ridge_v1(run={run_ridge}, preds={ridge_pred.dropna().shape[0]}, evals=9) | "
-            f"lgbm_v1(run={run_lgbm}, preds={lgbm_pred.dropna().shape[0]}, evals=3) | "
-            f"ridge_v1_served(run={run_served}, artifact gravado)"
+            f"Gravado: {ridge_name}(run={run_ridge}, preds={ridge_pred.dropna().shape[0]}, evals=9) | "
+            f"{lgbm_name}(run={run_lgbm}, preds={lgbm_pred.dropna().shape[0]}, evals=3) | "
+            f"{served_name}(run={run_served}, artifact gravado)"
         )
-        print(
-            f"Referência p/ paridade TS: pipeline/parity_cases.json ({n_cases} casos) | "
-            f"pipeline/holidays_br.json ({n_holidays} feriados)"
-        )
+        if n_cases:
+            print(
+                f"Referência p/ paridade TS: pipeline/parity_cases.json ({n_cases} casos) | "
+                f"pipeline/holidays_br.json ({n_holidays} feriados)"
+            )
     finally:
         conn.close()
 
