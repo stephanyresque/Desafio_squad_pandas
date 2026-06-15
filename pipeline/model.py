@@ -1,19 +1,26 @@
-"""Backtest walk-forward do subsistema SECO: Ridge × ingênuo sazonal × programada ONS.
+"""Backtest walk-forward do subsistema SECO: Ridge × LightGBM × ingênuo sazonal × programada ONS.
 
 PRIORIDADE ABSOLUTA: zero vazamento. Toda feature de carga respeita o PISO DE 24h —
 para prever a hora-alvo t, nenhuma feature toca dado no intervalo (t−24h, t]; só t−24h
 ou antes. O calendário é determinístico (não vaza). Nada é normalizado sobre o dataset
-inteiro: o StandardScaler é reajustado no treino de CADA origem.
+inteiro: o StandardScaler do Ridge é reajustado no treino de CADA origem.
+
+Ridge e LightGBM compartilham EXATAMENTE a mesma matriz de features e o mesmo protocolo
+walk-forward (origens mensais, janela expansível, treina com alvos < O). Só o estimador
+muda. Os 4 preditores são avaliados nas MESMAS horas — única forma de a comparação ser justa.
 
 Walk-forward day-ahead, janela EXPANSÍVEL, re-treino mensal:
   - corte inicial: treino 2024-06-01..2025-05-31, teste a partir de 2025-06-01;
   - origens de re-treino = início de cada mês do teste;
-  - em cada origem O treina com alvos ESTRITAMENTE < O (assim nenhuma hora prevista é
-    vista no treino — o spec dizia "alvo <= O", mas isso colocaria a própria hora O em
-    treino e teste; cortar em < O elimina essa sobreposição de 1h) e prevê [O, próxima O).
+  - em cada origem O treina com alvos ESTRITAMENTE < O (nenhuma hora prevista é vista no
+    treino) e prevê [O, próxima O).
 
-Grava model_runs (1), predictions (ridge) e evaluations (ridge/naive/ons × mape/mae/rmse).
-Idempotente: remove qualquer run "ridge_v1" anterior (e seus filhos) antes de inserir.
+Grava 3 model_runs:
+  - ridge_v1     (backtest): predictions do ridge + evaluations ridge/naive/ons;
+  - lgbm_v1      (backtest): predictions do lgbm  + evaluations lgbm;
+  - ridge_v1_served:         artifact JSON do Ridge treinado em TODO o histórico (p/ a
+                             /api/forecast servir em TS). Sem predictions/evaluations.
+Idempotente: remove runs anteriores desses 3 nomes (e filhos) antes de inserir.
 
 Uso: python pipeline/model.py
 """
@@ -24,13 +31,20 @@ import json
 import os
 import subprocess
 import sys
+import warnings
 from datetime import datetime, timedelta, timezone
+from typing import Callable
+
+# LightGBM treina/prevê com arrays numpy (sem nomes de coluna) — silencia o aviso cosmético
+# do sklearn sobre feature names; não afeta valores.
+warnings.filterwarnings("ignore", message="X does not have valid feature names")
 
 import holidays
 import numpy as np
 import pandas as pd
 import psycopg2
 from dotenv import load_dotenv
+from lightgbm import LGBMRegressor
 from psycopg2.extras import Json, execute_values
 from sklearn.linear_model import Ridge
 from sklearn.pipeline import make_pipeline
@@ -38,9 +52,24 @@ from sklearn.preprocessing import StandardScaler
 
 BRASILIA = timezone(timedelta(hours=-3))
 CODIGO = "SECO"
-MODEL_NAME = "ridge_v1"
-RIDGE_ALPHA = 1.0
 HORIZON_H = 24
+
+RIDGE_NAME = "ridge_v1"
+LGBM_NAME = "lgbm_v1"
+SERVED_NAME = "ridge_v1_served"
+
+RIDGE_ALPHA = 1.0
+LGBM_PARAMS = {
+    "n_estimators": 400,
+    "learning_rate": 0.05,
+    "num_leaves": 31,
+    "subsample": 0.8,
+    "subsample_freq": 1,
+    "colsample_bytree": 0.8,
+    "random_state": 42,
+    "n_jobs": -1,
+    "verbosity": -1,
+}
 
 TRAIN_START = pd.Timestamp("2024-06-01 00:00", tz=BRASILIA)
 INITIAL_TRAIN_END = pd.Timestamp("2025-05-31 23:00", tz=BRASILIA)
@@ -165,8 +194,17 @@ def build_features(actual: pd.Series) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# Walk-forward
+# Walk-forward (genérico no estimador)
 # ---------------------------------------------------------------------------
+def make_ridge():
+    return make_pipeline(StandardScaler(), Ridge(alpha=RIDGE_ALPHA))
+
+
+def make_lgbm():
+    # LightGBM usa as features cruas: sem scaling, NaN nativo (aqui já filtrados por `valid`).
+    return LGBMRegressor(**LGBM_PARAMS)
+
+
 def month_origins(start: pd.Timestamp, end: pd.Timestamp) -> list[pd.Timestamp]:
     origins = []
     o = start
@@ -176,27 +214,66 @@ def month_origins(start: pd.Timestamp, end: pd.Timestamp) -> list[pd.Timestamp]:
     return origins
 
 
-def walk_forward(X: pd.DataFrame, y: pd.Series) -> pd.Series:
-    """Treina/prevê por origem mensal. Retorna ŷ do ridge indexado por hora-alvo."""
+def walk_forward(
+    X: pd.DataFrame,
+    y: pd.Series,
+    make_model: Callable,
+) -> pd.Series:
+    """Treina/prevê por origem mensal. Mesmo `valid` p/ todos os estimadores → mesmas horas."""
     valid = X.notna().all(axis=1) & y.notna()
     origins = month_origins(TEST_START, y.index.max())
     preds = pd.Series(index=y.index, dtype=float)
 
     for i, o in enumerate(origins):
-        next_o = origins[i + 1] if i + 1 < len(origins) else y.index.max() + pd.Timedelta(hours=1)
-
-        # Treino: alvos ESTRITAMENTE antes de O (nenhuma hora prevista entra no treino)
-        train_mask = valid & (y.index < o)
-        # Teste: [O, próxima origem)
+        next_o = (
+            origins[i + 1]
+            if i + 1 < len(origins)
+            else y.index.max() + pd.Timedelta(hours=1)
+        )
+        train_mask = valid & (y.index < o)  # alvos estritamente antes de O
         test_mask = valid & (y.index >= o) & (y.index < next_o)
         if train_mask.sum() == 0 or test_mask.sum() == 0:
             continue
 
-        model = make_pipeline(StandardScaler(), Ridge(alpha=RIDGE_ALPHA))
+        model = make_model()
         model.fit(X.loc[train_mask].to_numpy(), y.loc[train_mask].to_numpy())
         preds.loc[test_mask] = model.predict(X.loc[test_mask].to_numpy())
 
     return preds
+
+
+# ---------------------------------------------------------------------------
+# Ridge servido — treino em TODO o histórico, artifact JSON p/ inferência em TS
+# ---------------------------------------------------------------------------
+def fit_served_ridge(X: pd.DataFrame, y: pd.Series) -> tuple[dict, pd.Timestamp, int]:
+    valid = X.notna().all(axis=1) & y.notna()
+    Xv = X.loc[valid]
+    yv = y.loc[valid]
+
+    pipe = make_pipeline(StandardScaler(), Ridge(alpha=RIDGE_ALPHA))
+    pipe.fit(Xv.to_numpy(), yv.to_numpy())
+
+    scaler: StandardScaler = pipe.named_steps["standardscaler"]
+    ridge: Ridge = pipe.named_steps["ridge"]
+
+    artifact = {
+        "model": "ridge",
+        "alpha": RIDGE_ALPHA,
+        "subsystem": CODIGO,
+        "target": "load_mw",
+        "horizon_h": HORIZON_H,
+        "leakage_floor_h": 24,
+        "features": FEATURES,  # ORDEM exata — a inferência TS deve montar x nesta ordem
+        "scaler_mean": [float(v) for v in scaler.mean_],
+        "scaler_scale": [float(v) for v in scaler.scale_],
+        "coef": [float(v) for v in ridge.coef_],
+        "intercept": float(ridge.intercept_),
+        "formula": "yhat = intercept + sum_i coef_i * ((x_i - scaler_mean_i) / scaler_scale_i)",
+        "trained_rows": int(valid.sum()),
+        "train_start": str(yv.index.min().date()),
+        "train_end": str(yv.index.max().date()),
+    }
+    return artifact, yv.index.max(), int(valid.sum())
 
 
 # ---------------------------------------------------------------------------
@@ -227,90 +304,105 @@ def git_commit() -> str | None:
         return None
 
 
-def persist(
-    conn,
-    sub_id: int,
+def insert_run(
+    cur,
+    model_name: str,
     hyperparams: dict,
-    train_end: pd.Timestamp,
-    ridge_pred: pd.Series,
-    evals: dict[str, dict[str, float]],
+    artifact: dict | None,
+    train_start,
+    train_end,
+    commit: str | None,
 ) -> int:
-    with conn.cursor() as cur:
-        # Idempotência: apaga runs anteriores deste model_name (e filhos)
-        cur.execute("SELECT id FROM model_runs WHERE model_name = %s", (MODEL_NAME,))
-        old = [r[0] for r in cur.fetchall()]
-        if old:
-            cur.execute("DELETE FROM evaluations WHERE model_run_id = ANY(%s)", (old,))
-            cur.execute("DELETE FROM predictions WHERE model_run_id = ANY(%s)", (old,))
-            cur.execute("DELETE FROM model_runs WHERE id = ANY(%s)", (old,))
+    cur.execute(
+        """
+        INSERT INTO model_runs
+            (model_name, trained_at, hyperparams, artifact, git_commit, train_start, train_end)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        RETURNING id
+        """,
+        (
+            model_name,
+            datetime.now(BRASILIA),
+            Json(hyperparams),
+            Json(artifact) if artifact is not None else None,
+            commit,
+            train_start,
+            train_end,
+        ),
+    )
+    return int(cur.fetchone()[0])
 
-        cur.execute(
-            """
-            INSERT INTO model_runs
-                (model_name, trained_at, hyperparams, artifact, git_commit, train_start, train_end)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
-            RETURNING id
-            """,
-            (
-                MODEL_NAME,
-                datetime.now(BRASILIA),
-                Json(hyperparams),
-                None,  # artifact null por enquanto (Ridge servido vem depois)
-                git_commit(),
-                TRAIN_START.date(),
-                train_end.date(),
-            ),
-        )
-        model_run_id = int(cur.fetchone()[0])
 
-        pred_rows = [
-            (model_run_id, sub_id, ts.to_pydatetime(), float(v))
-            for ts, v in ridge_pred.dropna().items()
-        ]
-        execute_values(
-            cur,
-            "INSERT INTO predictions (model_run_id, subsystem_id, target_ts, predicted_mw) VALUES %s",
-            pred_rows,
-        )
+def insert_predictions(cur, model_run_id: int, sub_id: int, preds: pd.Series) -> int:
+    rows = [
+        (model_run_id, sub_id, ts.to_pydatetime(), float(v))
+        for ts, v in preds.dropna().items()
+    ]
+    execute_values(
+        cur,
+        "INSERT INTO predictions (model_run_id, subsystem_id, target_ts, predicted_mw) VALUES %s",
+        rows,
+    )
+    return len(rows)
 
-        eval_rows = [
-            (model_run_id, sub_id, predictor, metric, value, HORIZON_H)
-            for predictor, ms in evals.items()
-            for metric, value in ms.items()
-        ]
-        execute_values(
-            cur,
-            """
-            INSERT INTO evaluations
-                (model_run_id, subsystem_id, predictor, metric, value, horizon_h)
-            VALUES %s
-            """,
-            eval_rows,
-        )
 
-    conn.commit()
-    return model_run_id
+def insert_evaluations(
+    cur, model_run_id: int, sub_id: int, evals: dict[str, dict[str, float]]
+) -> int:
+    rows = [
+        (model_run_id, sub_id, predictor, metric, value, HORIZON_H)
+        for predictor, ms in evals.items()
+        for metric, value in ms.items()
+    ]
+    execute_values(
+        cur,
+        """
+        INSERT INTO evaluations
+            (model_run_id, subsystem_id, predictor, metric, value, horizon_h)
+        VALUES %s
+        """,
+        rows,
+    )
+    return len(rows)
+
+
+def delete_prior_runs(cur, names: list[str]) -> None:
+    cur.execute("SELECT id FROM model_runs WHERE model_name = ANY(%s)", (names,))
+    old = [r[0] for r in cur.fetchall()]
+    if old:
+        cur.execute("DELETE FROM evaluations WHERE model_run_id = ANY(%s)", (old,))
+        cur.execute("DELETE FROM predictions WHERE model_run_id = ANY(%s)", (old,))
+        cur.execute("DELETE FROM model_runs WHERE id = ANY(%s)", (old,))
 
 
 # ---------------------------------------------------------------------------
 # Relatório
 # ---------------------------------------------------------------------------
-def report(evals: dict, n: int, t0: pd.Timestamp, t1: pd.Timestamp) -> None:
+def report(
+    evals: dict, n: int, t0: pd.Timestamp, t1: pd.Timestamp, artifact: dict, artifact_bytes: int
+) -> None:
     print()
     print(f"Teste: {n} horas | {t0} .. {t1} (Brasília) | horizonte {HORIZON_H}h")
     print(f"{'predictor':<10}{'MAPE %':>10}{'MAE MWmed':>14}{'RMSE MWmed':>14}")
     print("-" * 48)
-    for p in ("ridge", "naive", "ons"):
+    for p in ("ridge", "lgbm", "naive", "ons"):
         m = evals[p]
         print(f"{p:<10}{m['mape']:>10.2f}{m['mae']:>14.1f}{m['rmse']:>14.1f}")
     print()
-    for base in ("naive", "ons"):
+    for base in ("ridge", "naive", "ons"):
         for metric in ("mape", "mae", "rmse"):
             b = evals[base][metric]
-            r = evals["ridge"][metric]
+            r = evals["lgbm"][metric]
             skill = (b - r) / b * 100 if b else float("nan")
-            print(f"skill ridge vs {base:<5} ({metric.upper()}): {skill:+.1f}% redução de erro")
+            print(
+                f"skill lgbm vs {base:<5} ({metric.upper()}): {skill:+.1f}% redução de erro"
+            )
         print()
+    print(
+        f"Artifact do Ridge servido: {len(artifact['features'])} features | "
+        f"{artifact_bytes} bytes (JSON) | treinado em {artifact['trained_rows']} horas "
+        f"({artifact['train_start']}..{artifact['train_end']})"
+    )
 
 
 def main() -> None:
@@ -338,13 +430,16 @@ def main() -> None:
         y = actual
         naive = actual.shift(168)
 
-        ridge_pred = walk_forward(X, y)
+        # Mesmo protocolo, só o estimador muda
+        ridge_pred = walk_forward(X, y, make_ridge)
+        lgbm_pred = walk_forward(X, y, make_lgbm)
 
-        # Conjunto de teste: horas onde os 4 existem (verificada, ridge, naive, ons)
+        # Conjunto de teste: horas com os 5 simultâneos (verificada, ridge, lgbm, naive, ons)
         test_df = pd.DataFrame(
             {
                 "actual": y,
                 "ridge": ridge_pred,
+                "lgbm": lgbm_pred,
                 "naive": naive,
                 "ons": programada,
             }
@@ -358,32 +453,87 @@ def main() -> None:
         a = test_df["actual"].to_numpy()
         evals = {
             "ridge": metrics(a, test_df["ridge"].to_numpy()),
+            "lgbm": metrics(a, test_df["lgbm"].to_numpy()),
             "naive": metrics(a, test_df["naive"].to_numpy()),
             "ons": metrics(a, test_df["ons"].to_numpy()),
         }
-
         n = len(test_df)
         t0, t1 = test_df.index.min(), test_df.index.max()
 
-        hyperparams = {
+        # Ridge servido (treino em todo o histórico)
+        artifact, served_end, _ = fit_served_ridge(X, y)
+        artifact_bytes = len(json.dumps(artifact))
+
+        commit = git_commit()
+        train_end_bt = month_origins(TEST_START, y.index.max())[-1].date()
+
+        ridge_hp = {
             "alpha": RIDGE_ALPHA,
             "features": FEATURES,
             "leakage_floor_h": 24,
             "walk_forward": "expanding, monthly retrain",
             "train_cut": "target < origin (estritamente)",
+            "scaler": "StandardScaler reajustado por origem",
             "initial_train": [str(TRAIN_START.date()), str(INITIAL_TRAIN_END.date())],
             "test_start": str(TEST_START.date()),
             "n_test_hours": n,
         }
-        # train_end = última origem usada (último corte de treino do walk-forward)
-        train_end = month_origins(TEST_START, y.index.max())[-1]
+        lgbm_hp = {
+            "estimator": "LGBMRegressor",
+            "params": LGBM_PARAMS,
+            "early_stopping": False,
+            "features": FEATURES,
+            "leakage_floor_h": 24,
+            "walk_forward": "expanding, monthly retrain",
+            "train_cut": "target < origin (estritamente)",
+            "scaling": "none (LightGBM usa features cruas)",
+            "test_start": str(TEST_START.date()),
+            "n_test_hours": n,
+        }
+        served_hp = {
+            "alpha": RIDGE_ALPHA,
+            "features": FEATURES,
+            "leakage_floor_h": 24,
+            "training": "Ridge final em TODO o histórico (não é um Ridge do walk-forward)",
+            "serves": "/api/forecast (inferência em TS)",
+        }
 
-        model_run_id = persist(conn, sub_id, hyperparams, train_end, ridge_pred, evals)
+        with conn.cursor() as cur:
+            delete_prior_runs(cur, [RIDGE_NAME, LGBM_NAME, SERVED_NAME])
 
-        report(evals, n, t0, t1)
+            run_ridge = insert_run(
+                cur, RIDGE_NAME, ridge_hp, None, TRAIN_START.date(), train_end_bt, commit
+            )
+            insert_predictions(cur, run_ridge, sub_id, ridge_pred)
+            insert_evaluations(
+                cur,
+                run_ridge,
+                sub_id,
+                {"ridge": evals["ridge"], "naive": evals["naive"], "ons": evals["ons"]},
+            )
+
+            run_lgbm = insert_run(
+                cur, LGBM_NAME, lgbm_hp, None, TRAIN_START.date(), train_end_bt, commit
+            )
+            insert_predictions(cur, run_lgbm, sub_id, lgbm_pred)
+            insert_evaluations(cur, run_lgbm, sub_id, {"lgbm": evals["lgbm"]})
+
+            run_served = insert_run(
+                cur,
+                SERVED_NAME,
+                served_hp,
+                artifact,
+                TRAIN_START.date(),
+                served_end.date(),
+                commit,
+            )
+        conn.commit()
+
+        report(evals, n, t0, t1, artifact, artifact_bytes)
         print(
-            f"Gravado: model_run_id={model_run_id} | "
-            f"predictions={ridge_pred.dropna().shape[0]} | evaluations=9 linhas"
+            f"Gravado: ridge_v1(run={run_ridge}, preds={ridge_pred.dropna().shape[0]}, evals=9) | "
+            f"lgbm_v1(run={run_lgbm}, preds={lgbm_pred.dropna().shape[0]}, evals=3) | "
+            f"ridge_v1_served(run={run_served}, artifact gravado)"
         )
     finally:
         conn.close()
