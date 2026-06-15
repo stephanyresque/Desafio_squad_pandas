@@ -36,6 +36,47 @@ function combineSeries(
   );
 }
 
+type OnsKpis = {
+  n: number;
+  mape: number;
+  mae: number;
+  rmse: number;
+};
+
+// Erro da programada (previsão ONS) contra a verificada (real), só nas horas
+// comparáveis: ambas não-nulas. Programada = previsão; verificada = real.
+function computeOnsKpis(data: LoadChartPoint[]): OnsKpis | null {
+  let n = 0;
+  let sumAbsPct = 0;
+  let sumAbs = 0;
+  let sumSq = 0;
+
+  for (const point of data) {
+    if (point.verificada == null || point.programada == null) {
+      continue;
+    }
+    if (point.verificada === 0) {
+      continue; // evita divisão por zero no MAPE (a ingestão já descarta zeros)
+    }
+    const erro = point.programada - point.verificada;
+    n += 1;
+    sumAbsPct += Math.abs(erro) / point.verificada;
+    sumAbs += Math.abs(erro);
+    sumSq += erro * erro;
+  }
+
+  if (n === 0) {
+    return null;
+  }
+
+  return {
+    n,
+    mape: (sumAbsPct / n) * 100,
+    mae: sumAbs / n,
+    rmse: Math.sqrt(sumSq / n),
+  };
+}
+
 export default async function Home() {
   const supabase = createClient();
 
@@ -66,9 +107,57 @@ export default async function Home() {
     forecastResult.data ?? [],
   );
 
+  const kpis = computeOnsKpis(chartData);
+
   return (
     <main className="mx-auto flex min-h-full w-full max-w-5xl flex-col px-6 py-10">
+      {kpis && (
+        <div className="mb-8 grid grid-cols-1 gap-4 sm:grid-cols-3">
+          <KpiCard
+            label="MAPE do ONS"
+            value={`${kpis.mape.toLocaleString("pt-BR", {
+              minimumFractionDigits: 1,
+              maximumFractionDigits: 1,
+            })}%`}
+            n={kpis.n}
+          />
+          <KpiCard
+            label="MAE"
+            value={`${Math.round(kpis.mae).toLocaleString("pt-BR")} MWmed`}
+            n={kpis.n}
+          />
+          <KpiCard
+            label="RMSE"
+            value={`${Math.round(kpis.rmse).toLocaleString("pt-BR")} MWmed`}
+            n={kpis.n}
+          />
+        </div>
+      )}
       <LoadChart data={chartData} />
     </main>
+  );
+}
+
+function KpiCard({
+  label,
+  value,
+  n,
+}: {
+  label: string;
+  value: string;
+  n: number;
+}) {
+  return (
+    <div className="rounded-lg border border-zinc-200 p-4 dark:border-zinc-800">
+      <p className="text-sm font-medium text-zinc-500 dark:text-zinc-400">
+        {label}
+      </p>
+      <p className="mt-1 text-2xl font-semibold text-zinc-900 dark:text-zinc-50">
+        {value}
+      </p>
+      <p className="mt-1 text-xs text-zinc-400 dark:text-zinc-500">
+        baseline oficial — {n.toLocaleString("pt-BR")} horas comparadas
+      </p>
+    </div>
   );
 }

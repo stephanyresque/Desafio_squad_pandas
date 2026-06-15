@@ -11,3 +11,5 @@ node_modules/
 # segredos
 .env
 .env.local
+.claude
+CLAUDE.md
