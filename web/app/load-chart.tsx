@@ -15,10 +15,16 @@ export type LoadChartPoint = {
   ts: string;
   verificada: number | null;
   programada: number | null;
+  modelo: number | null;
 };
 
 type LoadChartProps = {
   data: LoadChartPoint[];
+  // Formato/densidade dos ticks do eixo X — ajustáveis conforme o tamanho da janela.
+  xTickFormatter?: (ts: string) => string;
+  xMinTickGap?: number;
+  // Mostra a linha do modelo (LightGBM). No fallback (sem previsões) fica oculta.
+  showModel?: boolean;
 };
 
 function formatTs(ts: string): string {
@@ -36,19 +42,21 @@ function formatMw(value: number | string | null | undefined): string {
   return `${Number(value).toLocaleString("pt-BR")} MWmed`;
 }
 
-export default function LoadChart({ data }: LoadChartProps) {
+export default function LoadChart({
+  data,
+  xTickFormatter,
+  xMinTickGap,
+  showModel = true,
+}: LoadChartProps) {
   return (
     <div className="w-full">
-      <h1 className="mb-6 text-xl font-semibold text-zinc-900 dark:text-zinc-50">
-        Carga SE/CO: real × programada ONS (MWmed)
-      </h1>
       <ResponsiveContainer width="100%" height={420}>
         <LineChart data={data} margin={{ top: 8, right: 16, left: 8, bottom: 8 }}>
           <CartesianGrid strokeDasharray="3 3" stroke="#e4e4e7" />
           <XAxis
             dataKey="ts"
-            tickFormatter={formatTs}
-            minTickGap={32}
+            tickFormatter={xTickFormatter ?? formatTs}
+            minTickGap={xMinTickGap ?? 32}
             tick={{ fontSize: 11, fill: "#71717a" }}
           />
           <YAxis
@@ -91,6 +99,18 @@ export default function LoadChart({ data }: LoadChartProps) {
             connectNulls
             activeDot={{ r: 4 }}
           />
+          {showModel && (
+            <Line
+              type="monotone"
+              name="Modelo (LightGBM)"
+              dataKey="modelo"
+              stroke="#7c3aed"
+              strokeWidth={2}
+              dot={false}
+              connectNulls
+              activeDot={{ r: 4 }}
+            />
+          )}
         </LineChart>
       </ResponsiveContainer>
     </div>

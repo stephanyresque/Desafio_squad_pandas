@@ -1,83 +1,94 @@
 import { createClient } from "@/lib/supabase";
 import { brEpoch, brFields, brHourKey, HOUR_MS } from "@/lib/forecast/features";
 
-import LoadChart, { type LoadChartPoint } from "./load-chart";
+import { type LoadChartPoint } from "./load-chart";
+import ChartSection from "./chart-section";
 import LiveForecast from "./live-forecast";
 import SubsystemSelector, { type SubsystemOption } from "./subsystem-selector";
+import KpiCards, { type MetricTriple } from "./kpi-cards";
 
 export const dynamic = "force-dynamic";
 
+type SeriesRow = { ts: string; load_mw: number | string };
+
+// Mescla real, programada ONS e modelo (LightGBM) por timestamp.
 function combineSeries(
-  actualRows: { ts: string; load_mw: number | string }[],
-  forecastRows: { ts: string; load_mw: number | string }[],
+  actualRows: SeriesRow[],
+  forecastRows: SeriesRow[],
+  modelRows: SeriesRow[],
 ): LoadChartPoint[] {
   const byTs = new Map<string, LoadChartPoint>();
-
-  for (const row of actualRows) {
-    byTs.set(row.ts, {
-      ts: row.ts,
-      verificada: Number(row.load_mw),
-      programada: null,
-    });
-  }
-
-  for (const row of forecastRows) {
-    const existing = byTs.get(row.ts);
-    if (existing) {
-      existing.programada = Number(row.load_mw);
-    } else {
-      byTs.set(row.ts, {
-        ts: row.ts,
-        verificada: null,
-        programada: Number(row.load_mw),
-      });
+  const ensure = (ts: string): LoadChartPoint => {
+    let point = byTs.get(ts);
+    if (!point) {
+      point = { ts, verificada: null, programada: null, modelo: null };
+      byTs.set(ts, point);
     }
-  }
+    return point;
+  };
+
+  for (const row of actualRows) ensure(row.ts).verificada = Number(row.load_mw);
+  for (const row of forecastRows) ensure(row.ts).programada = Number(row.load_mw);
+  for (const row of modelRows) ensure(row.ts).modelo = Number(row.load_mw);
 
   return Array.from(byTs.values()).sort(
-    (a, b) => new Date(a.ts).getTime() - new Date(b.ts).getTime(),
+    (a, b) => Date.parse(a.ts) - Date.parse(b.ts),
   );
 }
 
-type OnsKpis = {
-  n: number;
-  mape: number;
-  mae: number;
-  rmse: number;
-};
+// Série COMPLETA de uma tabela (real/programada) p/ o gráfico. O PostgREST do
+// Supabase limita cada resposta (db-max-rows, ~1000); paginamos com .range() até
+// esgotar — assim o gráfico recebe todo o histórico, e a filtragem por intervalo
+// é feita no cliente. (Os KPIs continuam na consulta limitada, intocada.)
+const PAGE_SIZE = 1000;
 
-// Erro da programada (previsão ONS) contra a verificada (real), só nas horas
-// comparáveis: ambas não-nulas. Programada = previsão; verificada = real.
-function computeOnsKpis(data: LoadChartPoint[]): OnsKpis | null {
-  let n = 0;
-  let sumAbsPct = 0;
-  let sumAbs = 0;
-  let sumSq = 0;
+async function fetchAllRows(
+  supabase: ReturnType<typeof createClient>,
+  table: "load_actual" | "load_official_forecast",
+  codigo: string,
+): Promise<{ ts: string; load_mw: number | string }[]> {
+  const out: { ts: string; load_mw: number | string }[] = [];
+  for (let from = 0; ; from += PAGE_SIZE) {
+    const { data, error } = await supabase
+      .from(table)
+      .select("ts, load_mw, subsystems!inner(codigo)")
+      .eq("subsystems.codigo", codigo)
+      .order("ts", { ascending: true })
+      .range(from, from + PAGE_SIZE - 1);
 
-  for (const point of data) {
-    if (point.verificada == null || point.programada == null) {
-      continue;
-    }
-    if (point.verificada === 0) {
-      continue; // evita divisão por zero no MAPE (a ingestão já descarta zeros)
-    }
-    const erro = point.programada - point.verificada;
-    n += 1;
-    sumAbsPct += Math.abs(erro) / point.verificada;
-    sumAbs += Math.abs(erro);
-    sumSq += erro * erro;
+    if (error) throw new Error(error.message);
+    const rows = (data ?? []) as { ts: string; load_mw: number | string }[];
+    out.push(...rows);
+    if (rows.length < PAGE_SIZE) break;
   }
+  return out;
+}
 
-  if (n === 0) {
-    return null;
+// Previsões horárias de um modelo (ex.: lgbm_v1_SECO) — paginadas, ordenadas por
+// target_ts. Identifica o modelo pelo model_name (join em model_runs). Em caso de
+// erro retorna o que já tem (vazio dispara o fallback de 2 linhas no gráfico).
+async function fetchModelPredictions(
+  supabase: ReturnType<typeof createClient>,
+  modelName: string,
+): Promise<{ ts: string; load_mw: number | string }[]> {
+  const out: { ts: string; load_mw: number | string }[] = [];
+  for (let from = 0; ; from += PAGE_SIZE) {
+    const { data, error } = await supabase
+      .from("predictions")
+      .select("target_ts, predicted_mw, model_runs!inner(model_name)")
+      .eq("model_runs.model_name", modelName)
+      .order("target_ts", { ascending: true })
+      .range(from, from + PAGE_SIZE - 1);
+
+    if (error) break;
+    const rows = (data ?? []) as {
+      target_ts: string;
+      predicted_mw: number | string;
+    }[];
+    for (const row of rows) out.push({ ts: row.target_ts, load_mw: row.predicted_mw });
+    if (rows.length < PAGE_SIZE) break;
   }
-
-  return {
-    n,
-    mape: (sumAbsPct / n) * 100,
-    mae: sumAbs / n,
-    rmse: Math.sqrt(sumSq / n),
-  };
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -117,12 +128,44 @@ async function fetchSubsystemOptions(
 // ---------------------------------------------------------------------------
 const PREDICTOR_ORDER = ["naive", "ridge", "lgbm", "ons"] as const;
 const PREDICTOR_LABEL: Record<string, string> = {
-  naive: "Ingênuo sazonal",
+  naive: "Sazonal simples",
   ridge: "Ridge",
   lgbm: "LightGBM",
   ons: "Programada ONS",
 };
 const METRICS = ["mape", "mae", "rmse"] as const;
+
+const NAIVE_TOOLTIP =
+  "Previsão de referência mais básica: assume que a carga de cada hora será igual à da mesma hora da semana anterior (t−168h). Serve de piso — qualquer modelo útil precisa errar menos que ela.";
+
+// Tooltip só com CSS (hover + foco) — sem lib externa, funciona em Server Component.
+// O gatilho é focável por teclado e leva o texto como nome acessível.
+function LabelWithTooltip({
+  label,
+  tooltip,
+}: {
+  label: string;
+  tooltip: string;
+}) {
+  return (
+    <span className="group relative inline-flex items-center gap-1">
+      {label}
+      <button
+        type="button"
+        aria-label={tooltip}
+        className="inline-flex h-4 w-4 cursor-help items-center justify-center rounded-full border border-zinc-300 text-[10px] font-medium leading-none text-zinc-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 dark:border-zinc-700 dark:text-zinc-400"
+      >
+        ?
+      </button>
+      <span
+        role="tooltip"
+        className="pointer-events-none absolute left-0 top-full z-10 mt-1 w-64 rounded-md border border-zinc-200 bg-white p-2 text-xs font-normal text-zinc-600 opacity-0 shadow-lg transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300"
+      >
+        {tooltip}
+      </span>
+    </span>
+  );
+}
 
 type Comparison = {
   byPredictor: Record<string, Record<string, number>>;
@@ -185,15 +228,39 @@ function ComparisonPanel({ comparison }: { comparison: Comparison }) {
     );
   }
 
+  // Melhor (menor) valor por COLUNA — destaque de célula, não de linha.
+  const bestByMetric: Record<string, string | null> = {};
+  for (const metric of METRICS) {
+    let bestP: string | null = null;
+    let bestV = Infinity;
+    for (const p of rows) {
+      const v = byPredictor[p]?.[metric];
+      if (v != null && v < bestV) {
+        bestV = v;
+        bestP = p;
+      }
+    }
+    bestByMetric[metric] = bestP;
+  }
+
+  const hl =
+    "bg-emerald-50 font-semibold text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300";
+  const cell = (p: string, metric: string, base: string) =>
+    `${base} tabular-nums${bestByMetric[metric] === p ? ` ${hl}` : ""}`;
+
   return (
     <section>
       <h2 className="text-lg font-semibold text-zinc-900 dark:text-zinc-50">
         Comparação de modelos
       </h2>
       <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
-        Backtest walk-forward — 12 meses de teste, horizonte {horizonH ?? 24}h.
-        Avaliação nas MESMAS horas (diferente dos KPIs acima, que são da janela visível
-        do gráfico).
+        Simulamos cada modelo prevendo a carga do dia seguinte ao longo de 12 meses,
+        como em produção, e comparamos com o que de fato aconteceu (horizonte{" "}
+        {horizonH ?? 24}h). Todos avaliados exatamente nas mesmas horas.
+      </p>
+      <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+        Esta tabela é fixa (período de teste de 12 meses) e não muda com o seletor de
+        intervalo do gráfico.
       </p>
 
       <div className="mt-3 overflow-x-auto">
@@ -209,27 +276,24 @@ function ComparisonPanel({ comparison }: { comparison: Comparison }) {
           <tbody>
             {rows.map((p) => {
               const m = byPredictor[p];
-              const isBest = p === "lgbm";
               return (
                 <tr
                   key={p}
-                  className={
-                    isBest
-                      ? "border-b border-zinc-100 bg-green-50 font-semibold dark:border-zinc-900 dark:bg-green-950/40"
-                      : "border-b border-zinc-100 dark:border-zinc-900"
-                  }
+                  className="border-b border-zinc-100 dark:border-zinc-900"
                 >
                   <td className="py-1.5 pr-4">
-                    {PREDICTOR_LABEL[p] ?? p}
-                    {isBest && (
-                      <span className="ml-2 rounded bg-green-600 px-1.5 py-0.5 text-[10px] font-medium text-white">
-                        melhor modelo
-                      </span>
+                    {p === "naive" ? (
+                      <LabelWithTooltip
+                        label={PREDICTOR_LABEL.naive}
+                        tooltip={NAIVE_TOOLTIP}
+                      />
+                    ) : (
+                      (PREDICTOR_LABEL[p] ?? p)
                     )}
                   </td>
-                  <td className="py-1.5 pr-4 tabular-nums">{pct(m.mape)}</td>
-                  <td className="py-1.5 pr-4 tabular-nums">{mwmed(m.mae)}</td>
-                  <td className="py-1.5 tabular-nums">{mwmed(m.rmse)}</td>
+                  <td className={cell(p, "mape", "py-1.5 pr-4")}>{pct(m.mape)}</td>
+                  <td className={cell(p, "mae", "py-1.5 pr-4")}>{mwmed(m.mae)}</td>
+                  <td className={cell(p, "rmse", "py-1.5")}>{mwmed(m.rmse)}</td>
                 </tr>
               );
             })}
@@ -237,12 +301,17 @@ function ComparisonPanel({ comparison }: { comparison: Comparison }) {
         </table>
       </div>
 
+      <p className="mt-2 text-xs text-zinc-400 dark:text-zinc-500">
+        Em cada coluna, a célula destacada é o menor erro (melhor) — menor é melhor nas
+        três métricas.
+      </p>
+
       {(skillNaive != null || skillOns != null) && (
         <p className="mt-3 text-sm text-zinc-700 dark:text-zinc-300">
           Skill do LightGBM (redução de MAPE):{" "}
           {skillNaive != null && (
             <span className="font-medium">
-              {pct(skillNaive, 1)} vs ingênuo
+              {pct(skillNaive, 1)} vs sazonal simples
             </span>
           )}
           {skillNaive != null && skillOns != null && " · "}
@@ -260,17 +329,39 @@ function ComparisonPanel({ comparison }: { comparison: Comparison }) {
   );
 }
 
+// Linha de evaluations (mape/mae/rmse) → MetricTriple, ou null se incompleta.
+function toTriple(m: Record<string, number> | undefined): MetricTriple | null {
+  if (!m || m.mape == null || m.mae == null || m.rmse == null) return null;
+  return { mape: m.mape, mae: m.mae, rmse: m.rmse };
+}
+
 // ---------------------------------------------------------------------------
-// D+1 sugerido = dia seguinte ao último dia COMPLETO de verificada (precisa do
-// histórico até a hora 23:00 do dia anterior ao alvo).
+// Dia ancorado da previsão ao vivo = o ÚLTIMO dia COMPLETO de verificada (não o
+// seguinte). Assim há carga real para sobrepor previsto × real. Continua day-ahead
+// sem vazamento: a rota /api/forecast só usa features com piso de 24h (≤ fim de D−1).
 // ---------------------------------------------------------------------------
-function suggestedTargetDate(maxActualTs: string | null): string | null {
+function anchoredForecastDate(maxActualTs: string | null): string | null {
   if (!maxActualTs) return null;
   const maxEpoch = Date.parse(maxActualTs);
   const f = brFields(maxEpoch);
   let lastComplete = brEpoch(f.year, f.month, f.day, 0); // meia-noite do dia do maxTs
   if (f.hour < 23) lastComplete -= 24 * HOUR_MS; // dia ainda incompleto → usa o anterior
-  return brHourKey(lastComplete + 24 * HOUR_MS).slice(0, 10);
+  return brHourKey(lastComplete).slice(0, 10);
+}
+
+// Carga verificada (real) das 24h do dia ancorado, indexada pela hora-rótulo
+// (mesmo formato dos target_ts da /api/forecast) — para o overlay previsto × real.
+function realForDate(
+  fullActual: SeriesRow[],
+  targetDate: string | null,
+): Record<string, number> {
+  const out: Record<string, number> = {};
+  if (!targetDate) return out;
+  for (const row of fullActual) {
+    const key = brHourKey(Date.parse(row.ts));
+    if (key.slice(0, 10) === targetDate) out[key] = Number(row.load_mw);
+  }
+  return out;
 }
 
 export default async function Home({
@@ -287,18 +378,10 @@ export default async function Home({
     options[0]?.codigo ??
     "SECO";
 
-  const [actualResult, forecastResult, comparison, maxActualResult] =
+  const lgbmName = `lgbm_v1_${selected}`;
+
+  const [comparison, maxActualResult, fullActual, fullForecast, modelRows] =
     await Promise.all([
-      supabase
-        .from("load_actual")
-        .select("ts, load_mw, subsystems!inner(codigo)")
-        .eq("subsystems.codigo", selected)
-        .order("ts", { ascending: true }),
-      supabase
-        .from("load_official_forecast")
-        .select("ts, load_mw, subsystems!inner(codigo)")
-        .eq("subsystems.codigo", selected)
-        .order("ts", { ascending: true }),
       fetchComparison(supabase, selected),
       supabase
         .from("load_actual")
@@ -307,24 +390,39 @@ export default async function Home({
         .order("ts", { ascending: false })
         .limit(1)
         .maybeSingle(),
+      // Histórico completo (paginado): real e programada para o gráfico.
+      fetchAllRows(supabase, "load_actual", selected),
+      fetchAllRows(supabase, "load_official_forecast", selected),
+      // Previsões horárias do LightGBM — definem a janela do gráfico.
+      fetchModelPredictions(supabase, lgbmName),
     ]);
 
-  const error = actualResult.error ?? forecastResult.error;
-  if (error) {
-    return (
-      <main className="mx-auto flex min-h-full w-full max-w-5xl flex-col px-6 py-10">
-        <p className="text-red-600">Erro ao carregar dados: {error.message}</p>
-      </main>
-    );
+  // Janela do gráfico = [min, max] das previsões do modelo (sem hardcode). Real e
+  // programada ficam recortadas à MESMA janela. Sem previsões → fallback 2 linhas.
+  const modelAvailable = modelRows.length > 0;
+  let winMin = Infinity;
+  let winMax = -Infinity;
+  for (const row of modelRows) {
+    const e = Date.parse(row.ts);
+    if (e < winMin) winMin = e;
+    if (e > winMax) winMax = e;
   }
 
-  const chartData = combineSeries(
-    actualResult.data ?? [],
-    forecastResult.data ?? [],
-  );
-  const kpis = computeOnsKpis(chartData);
+  const combined = combineSeries(fullActual, fullForecast, modelRows);
+  const chartData = modelAvailable
+    ? combined.filter((p) => {
+        const e = Date.parse(p.ts);
+        return e >= winMin && e <= winMax;
+      })
+    : combined;
+
+  // KPIs do melhor modelo (LightGBM) + referência ONS — MESMA fonte da tabela.
+  const lgbm = toTriple(comparison.byPredictor.lgbm);
+  const ons = toTriple(comparison.byPredictor.ons);
+
   const maxActualTs = (maxActualResult.data as { ts: string } | null)?.ts ?? null;
-  const targetDate = suggestedTargetDate(maxActualTs);
+  const targetDate = anchoredForecastDate(maxActualTs);
+  const realByTs = realForDate(fullActual, targetDate);
 
   return (
     <main className="mx-auto flex min-h-full w-full max-w-5xl flex-col px-6 py-10">
@@ -332,60 +430,24 @@ export default async function Home({
         <SubsystemSelector options={options} value={selected} />
       </div>
 
-      {kpis && (
-        <div className="mb-8 grid grid-cols-1 gap-4 sm:grid-cols-3">
-          <KpiCard
-            label="MAPE do ONS"
-            value={`${kpis.mape.toLocaleString("pt-BR", {
-              minimumFractionDigits: 1,
-              maximumFractionDigits: 1,
-            })}%`}
-            n={kpis.n}
-          />
-          <KpiCard
-            label="MAE"
-            value={`${Math.round(kpis.mae).toLocaleString("pt-BR")} MWmed`}
-            n={kpis.n}
-          />
-          <KpiCard
-            label="RMSE"
-            value={`${Math.round(kpis.rmse).toLocaleString("pt-BR")} MWmed`}
-            n={kpis.n}
-          />
-        </div>
-      )}
+      {lgbm && <KpiCards metrics={lgbm} ons={ons} />}
 
-      <LoadChart data={chartData} />
+      <ChartSection
+        key={selected}
+        data={chartData}
+        modelAvailable={modelAvailable}
+      />
 
       <div className="mt-10">
         <ComparisonPanel comparison={comparison} />
       </div>
 
-      <LiveForecast subsystem={selected} targetDate={targetDate} />
+      <LiveForecast
+        subsystem={selected}
+        targetDate={targetDate}
+        realByTs={realByTs}
+      />
     </main>
   );
 }
 
-function KpiCard({
-  label,
-  value,
-  n,
-}: {
-  label: string;
-  value: string;
-  n: number;
-}) {
-  return (
-    <div className="rounded-lg border border-zinc-200 p-4 dark:border-zinc-800">
-      <p className="text-sm font-medium text-zinc-500 dark:text-zinc-400">
-        {label}
-      </p>
-      <p className="mt-1 text-2xl font-semibold text-zinc-900 dark:text-zinc-50">
-        {value}
-      </p>
-      <p className="mt-1 text-xs text-zinc-400 dark:text-zinc-500">
-        baseline oficial — {n.toLocaleString("pt-BR")} horas comparadas
-      </p>
-    </div>
-  );
-}
