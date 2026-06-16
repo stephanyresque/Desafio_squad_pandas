@@ -6,6 +6,9 @@ import ChartSection from "./chart-section";
 import LiveForecast from "./live-forecast";
 import SubsystemSelector, { type SubsystemOption } from "./subsystem-selector";
 import KpiCards, { type MetricTriple } from "./kpi-cards";
+import SubsystemsCompare, { type SubsystemMape } from "./subsystems-compare";
+import ErrorBreakdown from "./error-breakdown";
+import ResidualsHistogram from "./residuals-histogram";
 
 export const dynamic = "force-dynamic";
 
@@ -197,6 +200,42 @@ async function fetchComparison(
   return { byPredictor, horizonH };
 }
 
+// MAPE (lgbm × ons) dos 4 subsistemas de uma vez — para o painel comparativo
+// (independente do dropdown). Mesma fonte da tabela: evaluations, backtest 12 meses.
+const SUBSYSTEM_ORDER = ["SECO", "S", "NE", "N"];
+
+async function fetchSubsystemsMape(
+  supabase: ReturnType<typeof createClient>,
+): Promise<SubsystemMape[]> {
+  const { data } = await supabase
+    .from("evaluations")
+    .select("predictor, value, subsystems!inner(codigo, nome)")
+    .eq("metric", "mape")
+    .in("predictor", ["lgbm", "ons"]);
+
+  const rows = (data ?? []) as unknown as {
+    predictor: string;
+    value: number | string;
+    subsystems: JoinedSub | JoinedSub[];
+  }[];
+
+  const byCodigo = new Map<string, SubsystemMape>();
+  for (const row of rows) {
+    const sub = normalizeJoined(row.subsystems);
+    if (!sub) continue;
+    const entry =
+      byCodigo.get(sub.codigo) ??
+      { codigo: sub.codigo, nome: sub.nome, lgbm: null, ons: null };
+    if (row.predictor === "lgbm") entry.lgbm = Number(row.value);
+    if (row.predictor === "ons") entry.ons = Number(row.value);
+    byCodigo.set(sub.codigo, entry);
+  }
+
+  return SUBSYSTEM_ORDER.map((c) => byCodigo.get(c)).filter(
+    (e): e is SubsystemMape => e != null,
+  );
+}
+
 function pct(value: number, digits = 2): string {
   return `${value.toLocaleString("pt-BR", {
     minimumFractionDigits: digits,
@@ -379,23 +418,35 @@ export default async function Home({
     "SECO";
 
   const lgbmName = `lgbm_v1_${selected}`;
+  const ridgeName = `ridge_v1_${selected}`; // run de BACKTEST do Ridge (não o served)
 
-  const [comparison, maxActualResult, fullActual, fullForecast, modelRows] =
-    await Promise.all([
-      fetchComparison(supabase, selected),
-      supabase
-        .from("load_actual")
-        .select("ts, subsystems!inner(codigo)")
-        .eq("subsystems.codigo", selected)
-        .order("ts", { ascending: false })
-        .limit(1)
-        .maybeSingle(),
-      // Histórico completo (paginado): real e programada para o gráfico.
-      fetchAllRows(supabase, "load_actual", selected),
-      fetchAllRows(supabase, "load_official_forecast", selected),
-      // Previsões horárias do LightGBM — definem a janela do gráfico.
-      fetchModelPredictions(supabase, lgbmName),
-    ]);
+  const [
+    comparison,
+    maxActualResult,
+    fullActual,
+    fullForecast,
+    modelRows,
+    subsystemsMape,
+    ridgeRows,
+  ] = await Promise.all([
+    fetchComparison(supabase, selected),
+    supabase
+      .from("load_actual")
+      .select("ts, subsystems!inner(codigo)")
+      .eq("subsystems.codigo", selected)
+      .order("ts", { ascending: false })
+      .limit(1)
+      .maybeSingle(),
+    // Histórico completo (paginado): real e programada para o gráfico.
+    fetchAllRows(supabase, "load_actual", selected),
+    fetchAllRows(supabase, "load_official_forecast", selected),
+    // Previsões horárias do LightGBM — definem a janela do gráfico.
+    fetchModelPredictions(supabase, lgbmName),
+    // MAPE dos 4 subsistemas (independente do dropdown) para o painel comparativo.
+    fetchSubsystemsMape(supabase),
+    // Previsões de BACKTEST do Ridge — base da banda de incerteza da previsão ao vivo.
+    fetchModelPredictions(supabase, ridgeName),
+  ]);
 
   // Janela do gráfico = [min, max] das previsões do modelo (sem hardcode). Real e
   // programada ficam recortadas à MESMA janela. Sem previsões → fallback 2 linhas.
@@ -424,6 +475,18 @@ export default async function Home({
   const targetDate = anchoredForecastDate(maxActualTs);
   const realByTs = realForDate(fullActual, targetDate);
 
+  // Resíduos do Ridge (backtest) por hora do dia (Brasília) → base da banda de incerteza.
+  // O join real×previsto é feito aqui no servidor; os QUANTIS são calculados no cliente.
+  const actualByEpoch = new Map<number, number>();
+  for (const row of fullActual) actualByEpoch.set(Date.parse(row.ts), Number(row.load_mw));
+  const residualsByHour: number[][] = Array.from({ length: 24 }, () => []);
+  for (const p of ridgeRows) {
+    const epoch = Date.parse(p.ts);
+    const real = actualByEpoch.get(epoch);
+    if (real == null) continue;
+    residualsByHour[brFields(epoch).hour].push(Math.round(real - Number(p.load_mw)));
+  }
+
   return (
     <main className="mx-auto flex min-h-full w-full max-w-5xl flex-col px-6 py-10">
       <div className="mb-6">
@@ -439,13 +502,26 @@ export default async function Home({
       />
 
       <div className="mt-10">
+        <SubsystemsCompare data={subsystemsMape} />
+      </div>
+
+      <div className="mt-10">
         <ComparisonPanel comparison={comparison} />
+      </div>
+
+      <div className="mt-10">
+        <ErrorBreakdown key={selected} data={chartData} />
+      </div>
+
+      <div className="mt-10">
+        <ResidualsHistogram key={selected} data={chartData} />
       </div>
 
       <LiveForecast
         subsystem={selected}
         targetDate={targetDate}
         realByTs={realByTs}
+        residualsByHour={residualsByHour}
       />
     </main>
   );

@@ -1,11 +1,12 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import {
+  Area,
   CartesianGrid,
+  ComposedChart,
   Legend,
   Line,
-  LineChart,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -26,6 +27,9 @@ type State =
   | { kind: "error"; message: string }
   | { kind: "ok"; data: ForecastResponse };
 
+const MODEL_COLOR = "#7c3aed"; // violeta — previsto (Ridge) e banda
+const REAL_COLOR = "#2563eb"; // azul — real (verificada)
+
 function hourTick(targetTs: string): string {
   return `${targetTs.slice(11, 13)}h`; // "00h".."23h" da hora-rótulo em Brasília
 }
@@ -39,18 +43,44 @@ function formatDateBr(isoDate: string): string {
   return `${d}/${m}/${y}`;
 }
 
+// Quantil empírico (interpolação linear) de um array já ORDENADO.
+function quantile(sorted: number[], q: number): number {
+  if (sorted.length === 0) return 0;
+  if (sorted.length === 1) return sorted[0];
+  const idx = q * (sorted.length - 1);
+  const lo = Math.floor(idx);
+  const hi = Math.ceil(idx);
+  if (lo === hi) return sorted[lo];
+  return sorted[lo] + (idx - lo) * (sorted[hi] - sorted[lo]);
+}
+
 // Previsão ao vivo: chama o modelo Ridge servido para o subsistema selecionado e o dia
-// ancorado (último dia completo de verificada), e sobrepõe previsto × real.
+// ancorado (último dia completo de verificada), sobrepõe previsto × real e desenha a
+// banda de incerteza de ~90% (quantis dos resíduos do Ridge por hora do dia).
 export default function LiveForecast({
   subsystem,
   targetDate,
   realByTs,
+  residualsByHour,
 }: {
   subsystem: string;
   targetDate: string | null;
   realByTs: Record<string, number>;
+  residualsByHour: number[][];
 }) {
   const [state, setState] = useState<State>({ kind: "idle" });
+
+  // Quantis q05/q95 dos resíduos do Ridge por hora do dia — recomputa só quando muda
+  // o subsistema (novo residualsByHour). É a base da banda de ~90%.
+  const bandByHour = useMemo(
+    () =>
+      residualsByHour.map((arr) => {
+        if (arr.length === 0) return null;
+        const sorted = [...arr].sort((a, b) => a - b);
+        return { q05: quantile(sorted, 0.05), q95: quantile(sorted, 0.95) };
+      }),
+    [residualsByHour],
+  );
 
   async function run() {
     setState({ kind: "loading" });
@@ -106,23 +136,75 @@ export default function LiveForecast({
         </p>
       )}
 
-      {state.kind === "ok" && <Result data={state.data} realByTs={realByTs} />}
+      {state.kind === "ok" && (
+        <Result data={state.data} realByTs={realByTs} bandByHour={bandByHour} />
+      )}
     </section>
+  );
+}
+
+type Band = { q05: number; q95: number } | null;
+
+type TipItem = { dataKey?: string | number; value?: number | string };
+
+function ForecastTooltip({
+  active,
+  payload,
+  label,
+}: {
+  active?: boolean;
+  payload?: TipItem[];
+  label?: string | number;
+}) {
+  if (!active || !payload || payload.length === 0) return null;
+  const val = (k: string): number | null => {
+    const it = payload.find((p) => p.dataKey === k);
+    return it && it.value != null ? Number(it.value) : null;
+  };
+  const previsto = val("previsto");
+  const real = val("real");
+  const low = val("bandLow");
+  const range = val("bandRange");
+
+  return (
+    <div className="rounded-md border border-zinc-200 bg-white p-2 text-xs shadow-md dark:border-zinc-700 dark:bg-zinc-900">
+      <div className="mb-1 font-medium text-zinc-700 dark:text-zinc-200">{label}</div>
+      {previsto != null && (
+        <div style={{ color: MODEL_COLOR }}>Previsto: {formatMw(previsto)} MWmed</div>
+      )}
+      {real != null && (
+        <div style={{ color: REAL_COLOR }}>Real: {formatMw(real)} MWmed</div>
+      )}
+      {low != null && range != null && (
+        <div className="text-zinc-500 dark:text-zinc-400">
+          Faixa ~90%: {formatMw(low)}–{formatMw(low + range)} MWmed
+        </div>
+      )}
+    </div>
   );
 }
 
 function Result({
   data,
   realByTs,
+  bandByHour,
 }: {
   data: ForecastResponse;
   realByTs: Record<string, number>;
+  bandByHour: Band[];
 }) {
-  const chartData = data.predictions.map((p) => ({
-    hora: hourTick(p.target_ts),
-    previsto: p.predicted_mw,
-    real: realByTs[p.target_ts] ?? null,
-  }));
+  const chartData = data.predictions.map((p) => {
+    const h = Number(p.target_ts.slice(11, 13));
+    const band = bandByHour[h];
+    return {
+      hora: hourTick(p.target_ts),
+      previsto: p.predicted_mw,
+      real: realByTs[p.target_ts] ?? null,
+      // banda absoluta = previsto + quantil; desenhada como base (transparente) + faixa.
+      bandLow: band ? p.predicted_mw + band.q05 : null,
+      bandRange: band ? band.q95 - band.q05 : null,
+    };
+  });
 
   // Manchetes do dia previsto.
   let peak = -Infinity;
@@ -148,6 +230,7 @@ function Result({
   }
   const hasReal = pairs > 0;
   const mape = hasReal ? (sumAbsPct / pairs) * 100 : null;
+  const hasBand = chartData.some((d) => d.bandLow != null);
 
   return (
     <div className="mt-4">
@@ -182,7 +265,7 @@ function Result({
 
       <div className="mt-4">
         <ResponsiveContainer width="100%" height={260}>
-          <LineChart
+          <ComposedChart
             data={chartData}
             margin={{ top: 8, right: 16, left: 8, bottom: 8 }}
           >
@@ -205,17 +288,46 @@ function Result({
               }}
             />
             <Tooltip
-              formatter={(v, name) => [
-                v == null ? "—" : `${formatMw(Number(v))} MWmed`,
-                String(name),
-              ]}
+              content={(props) => (
+                <ForecastTooltip
+                  active={props.active}
+                  payload={props.payload as unknown as TipItem[] | undefined}
+                  label={props.label as string | number | undefined}
+                />
+              )}
             />
             <Legend />
+            {/* Banda primeiro (atrás): base transparente + faixa sombreada. */}
+            {hasBand && (
+              <Area
+                dataKey="bandLow"
+                stackId="band"
+                stroke="none"
+                fill="transparent"
+                isAnimationActive={false}
+                legendType="none"
+                tooltipType="none"
+                activeDot={false}
+              />
+            )}
+            {hasBand && (
+              <Area
+                dataKey="bandRange"
+                stackId="band"
+                name="Faixa ~90%"
+                stroke="none"
+                fill={MODEL_COLOR}
+                fillOpacity={0.18}
+                isAnimationActive={false}
+                activeDot={false}
+              />
+            )}
+            {/* Linhas por cima da banda. */}
             <Line
               type="monotone"
               dataKey="previsto"
               name="Previsto (Ridge)"
-              stroke="#7c3aed"
+              stroke={MODEL_COLOR}
               strokeWidth={2}
               dot={false}
             />
@@ -224,14 +336,20 @@ function Result({
                 type="monotone"
                 dataKey="real"
                 name="Real (verificada)"
-                stroke="#2563eb"
+                stroke={REAL_COLOR}
                 strokeWidth={2}
                 dot={false}
                 connectNulls
               />
             )}
-          </LineChart>
+          </ComposedChart>
         </ResponsiveContainer>
+        {hasBand && (
+          <p className="mt-2 text-xs text-zinc-400 dark:text-zinc-500">
+            Faixa de confiança de ~90% (com base no histórico de erros por hora). Em ~90%
+            dos dias, a carga real cai dentro desta faixa.
+          </p>
+        )}
       </div>
     </div>
   );
