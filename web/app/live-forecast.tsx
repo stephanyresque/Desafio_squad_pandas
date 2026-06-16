@@ -27,8 +27,8 @@ type State =
   | { kind: "error"; message: string }
   | { kind: "ok"; data: ForecastResponse };
 
-const MODEL_COLOR = "#7c3aed"; // violeta — previsto (Ridge) e banda
-const REAL_COLOR = "#2563eb"; // azul — real (verificada)
+const MODEL_COLOR = "#AC4DFF"; // roxo — previsto (Ridge) e banda
+const REAL_COLOR = "#2B60D6"; // azul — real (verificada)
 
 function hourTick(targetTs: string): string {
   return `${targetTs.slice(11, 13)}h`; // "00h".."23h" da hora-rótulo em Brasília
@@ -103,16 +103,13 @@ export default function LiveForecast({
   }
 
   return (
-    <section className="mt-10">
+    <section>
       <div className="flex flex-wrap items-center gap-3">
-        <h2 className="text-lg font-semibold text-zinc-900 dark:text-zinc-50">
-          Previsão ao vivo (modelo servido)
-        </h2>
         <button
           type="button"
           onClick={run}
           disabled={state.kind === "loading"}
-          className="rounded-md bg-blue-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+          className="rounded-md bg-[#550899] px-3 py-1.5 text-sm font-medium text-white hover:bg-[#6b15b0] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#AC4DFF] disabled:opacity-50"
         >
           {state.kind === "loading"
             ? "Gerando…"
@@ -120,8 +117,7 @@ export default function LiveForecast({
         </button>
       </div>
       <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
-        Dia seguinte ao último dado disponível do ONS; calculado ao vivo pelo modelo
-        Ridge.
+        Dia seguinte ao último dado disponível do ONS; calculado pelo modelo Ridge.
       </p>
 
       {state.kind === "loading" && (
@@ -177,7 +173,7 @@ function ForecastTooltip({
       )}
       {low != null && range != null && (
         <div className="text-zinc-500 dark:text-zinc-400">
-          Faixa ~90%: {formatMw(low)}–{formatMw(low + range)} MWmed
+          Faixa ~90%: {formatMw(low)} a {formatMw(low + range)} MWmed
         </div>
       )}
     </div>
@@ -235,7 +231,7 @@ function Result({
   return (
     <div className="mt-4">
       <h3 className="text-base font-semibold text-zinc-900 dark:text-zinc-50">
-        Previsão ao vivo — {formatDateBr(data.target_date)}
+        Previsão para {formatDateBr(data.target_date)}
       </h3>
 
       <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-3">

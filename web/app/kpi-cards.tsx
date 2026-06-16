@@ -26,7 +26,7 @@ type MetricExplain = {
 
 const EXPLAIN: Record<MetricKey, MetricExplain> = {
   mape: {
-    title: "MAPE — Erro Percentual Absoluto Médio",
+    title: "MAPE: Erro Percentual Absoluto Médio",
     oneLine: "o quanto a previsão erra, em média, em porcentagem.",
     howToRead:
       "para cada hora, calcula-se |real − previsto| ÷ real; o MAPE é a média desses percentuais. Um MAPE de 1,1% significa que, em média, a previsão errou 1,1% da carga real. Quanto menor, melhor.",
@@ -34,15 +34,15 @@ const EXPLAIN: Record<MetricKey, MetricExplain> = {
       "por ser percentual, permite comparar regiões de tamanhos muito diferentes na mesma escala. É a métrica principal deste projeto.",
   },
   mae: {
-    title: "MAE — Erro Absoluto Médio",
+    title: "MAE: Erro Absoluto Médio",
     oneLine: "o tamanho médio do erro, na própria unidade de carga (MWmed).",
     howToRead:
       "para cada hora, calcula-se |real − previsto|; o MAE é a média. Um MAE de 459 MWmed significa que, em média, a previsão errou cerca de 459 MWmed (para mais ou para menos). Quanto menor, melhor.",
     whyMatters:
-      "está na unidade real do sistema, então é tangível. É uma métrica robusta — uma única hora muito ruim não distorce o resultado de forma desproporcional.",
+      "está na unidade real do sistema, então é tangível. É uma métrica robusta: uma única hora muito ruim não distorce o resultado de forma desproporcional.",
   },
   rmse: {
-    title: "RMSE — Raiz do Erro Quadrático Médio",
+    title: "RMSE: Raiz do Erro Quadrático Médio",
     oneLine: "parecido com o MAE, mas pune erros grandes com mais força.",
     howToRead:
       "também em MWmed, mas cada erro é elevado ao quadrado antes de tirar a média (e depois extrai-se a raiz). Por isso o RMSE é sempre maior ou igual ao MAE. Quando o RMSE é bem maior que o MAE, é sinal de que existem algumas horas com erros grandes puxando o resultado.",
@@ -52,7 +52,14 @@ const EXPLAIN: Record<MetricKey, MetricExplain> = {
 };
 
 const FOOTER =
-  "Calculado sobre o backtest de 12 meses — o modelo prevendo o dia seguinte, comparado à carga verificada, nas mesmas horas que o ONS.";
+  "Calculado sobre o teste retroativo de 12 meses: o modelo prevendo a carga do dia seguinte, comparado à carga verificada, nas mesmas horas que o ONS.";
+
+// Fórmula de cada métrica (y = real, ŷ = previsto, n = nº de horas).
+const FORMULA: Record<MetricKey, string> = {
+  mape: "= (100 / n) · Σ |y − ŷ| / y",
+  mae: "= (1 / n) · Σ |y − ŷ|",
+  rmse: "= √[ (1 / n) · Σ (y − ŷ)² ]",
+};
 
 function fmtPct(value: number): string {
   return `${value.toLocaleString("pt-BR", {
@@ -161,6 +168,19 @@ function MetricModal({
           </p>
         </div>
 
+        <div className="mt-4">
+          <p className="mb-1 text-xs font-medium text-zinc-500 dark:text-zinc-400">
+            Fórmula
+          </p>
+          <div className="rounded-md bg-zinc-100 px-3 py-2.5 text-center font-mono text-[15px] text-zinc-800 dark:bg-zinc-800/60 dark:text-zinc-100">
+            <span className="font-semibold">{metric.toUpperCase()}</span>{" "}
+            {FORMULA[metric]}
+          </div>
+          <p className="mt-1.5 text-center text-[11px] text-zinc-400 dark:text-zinc-500">
+            y = carga real · ŷ = previsão · n = nº de horas
+          </p>
+        </div>
+
         <p className="mt-4 border-t border-zinc-100 pt-3 text-xs text-zinc-400 dark:border-zinc-800 dark:text-zinc-500">
           {FOOTER}
         </p>
@@ -188,7 +208,7 @@ export default function KpiCards({
             type="button"
             onClick={() => setOpen(card.key)}
             aria-haspopup="dialog"
-            className="cursor-pointer rounded-lg border border-zinc-200 p-4 text-left transition-colors hover:border-zinc-400 focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 dark:border-zinc-800 dark:hover:border-zinc-600"
+            className="cursor-pointer rounded-lg border border-zinc-200 p-4 text-left transition-colors hover:border-[#AC4DFF] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#AC4DFF] dark:border-zinc-800 dark:hover:border-[#AC4DFF]"
           >
             <p className="text-sm font-medium text-zinc-500 dark:text-zinc-400">
               {card.title}

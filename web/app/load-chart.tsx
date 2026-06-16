@@ -83,7 +83,7 @@ export default function LoadChart({
             type="monotone"
             name="Real"
             dataKey="verificada"
-            stroke="#2563eb"
+            stroke="#2B60D6"
             strokeWidth={2}
             dot={false}
             connectNulls
@@ -93,7 +93,7 @@ export default function LoadChart({
             type="monotone"
             name="Programada"
             dataKey="programada"
-            stroke="#f59e0b"
+            stroke="#FF6A00"
             strokeWidth={2}
             dot={false}
             connectNulls
@@ -104,7 +104,7 @@ export default function LoadChart({
               type="monotone"
               name="Modelo (LightGBM)"
               dataKey="modelo"
-              stroke="#7c3aed"
+              stroke="#AC4DFF"
               strokeWidth={2}
               dot={false}
               connectNulls

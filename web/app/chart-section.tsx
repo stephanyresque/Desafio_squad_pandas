@@ -157,8 +157,7 @@ export default function ChartSection({
 
   const baseBtn =
     "rounded-md border px-3 py-1 text-sm transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-400";
-  const activeBtn =
-    "border-blue-600 bg-blue-600 text-white dark:border-blue-500 dark:bg-blue-500";
+  const activeBtn = "border-[#550899] bg-[#550899] text-white";
   const idleBtn =
     "border-zinc-200 text-zinc-700 hover:border-zinc-400 dark:border-zinc-800 dark:text-zinc-300 dark:hover:border-zinc-600";
 
@@ -170,7 +169,7 @@ export default function ChartSection({
 
       {!modelAvailable && (
         <p className="mb-4 text-xs text-amber-600 dark:text-amber-500">
-          Previsões do modelo indisponíveis para este subsistema — exibindo real ×
+          Previsões do modelo indisponíveis para este subsistema, exibindo real ×
           programada ONS.
         </p>
       )}

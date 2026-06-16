@@ -139,7 +139,7 @@ const PREDICTOR_LABEL: Record<string, string> = {
 const METRICS = ["mape", "mae", "rmse"] as const;
 
 const NAIVE_TOOLTIP =
-  "Previsão de referência mais básica: assume que a carga de cada hora será igual à da mesma hora da semana anterior (t−168h). Serve de piso — qualquer modelo útil precisa errar menos que ela.";
+  "Previsão de referência mais básica: assume que a carga de cada hora será igual à da mesma hora da semana anterior (t−168h). Serve de piso: qualquer modelo útil precisa errar menos que ela.";
 
 // Tooltip só com CSS (hover + foco) — sem lib externa, funciona em Server Component.
 // O gatilho é focável por teclado e leva o texto como nome acessível.
@@ -262,7 +262,7 @@ function ComparisonPanel({ comparison }: { comparison: Comparison }) {
   if (rows.length === 0) {
     return (
       <p className="text-sm text-zinc-500">
-        Sem avaliação de backtest para este subsistema ainda.
+        Sem avaliação de teste retroativo para este subsistema ainda.
       </p>
     );
   }
@@ -283,7 +283,7 @@ function ComparisonPanel({ comparison }: { comparison: Comparison }) {
   }
 
   const hl =
-    "bg-emerald-50 font-semibold text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300";
+    "bg-[#AAF766]/40 font-semibold text-zinc-900 dark:bg-[#AAF766]/15 dark:text-[#AAF766]";
   const cell = (p: string, metric: string, base: string) =>
     `${base} tabular-nums${bestByMetric[metric] === p ? ` ${hl}` : ""}`;
 
@@ -293,9 +293,9 @@ function ComparisonPanel({ comparison }: { comparison: Comparison }) {
         Comparação de modelos
       </h2>
       <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
-        Simulamos cada modelo prevendo a carga do dia seguinte ao longo de 12 meses,
-        como em produção, e comparamos com o que de fato aconteceu (horizonte{" "}
-        {horizonH ?? 24}h). Todos avaliados exatamente nas mesmas horas.
+        Cada modelo foi simulado prevendo a carga do dia seguinte, dia após dia, ao longo
+        de 12 meses, como em produção, e comparado com o que de fato aconteceu (previsão de{" "}
+        {horizonH ?? 24} horas à frente). Todos avaliados exatamente nas mesmas horas.
       </p>
       <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
         Esta tabela é fixa (período de teste de 12 meses) e não muda com o seletor de
@@ -341,13 +341,13 @@ function ComparisonPanel({ comparison }: { comparison: Comparison }) {
       </div>
 
       <p className="mt-2 text-xs text-zinc-400 dark:text-zinc-500">
-        Em cada coluna, a célula destacada é o menor erro (melhor) — menor é melhor nas
+        Em cada coluna, a célula destacada é o menor erro (melhor). Menor é melhor nas
         três métricas.
       </p>
 
       {(skillNaive != null || skillOns != null) && (
         <p className="mt-3 text-sm text-zinc-700 dark:text-zinc-300">
-          Skill do LightGBM (redução de MAPE):{" "}
+          Ganho do LightGBM (redução de MAPE):{" "}
           {skillNaive != null && (
             <span className="font-medium">
               {pct(skillNaive, 1)} vs sazonal simples
@@ -401,6 +401,56 @@ function realForDate(
     if (key.slice(0, 10) === targetDate) out[key] = Number(row.load_mw);
   }
   return out;
+}
+
+// Cabeçalho de seção da narrativa: título + subtítulo.
+function SectionHeader({
+  title,
+  subtitle,
+}: {
+  title: string;
+  subtitle: string;
+}) {
+  return (
+    <div className="border-b border-zinc-200 pb-4 dark:border-zinc-800">
+      <h2 className="text-2xl font-bold tracking-tight text-zinc-900 dark:text-zinc-50">
+        {title}
+      </h2>
+      <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">{subtitle}</p>
+    </div>
+  );
+}
+
+// Seções da narrativa — usadas pela navegação âncora e pelos ids das <section>.
+const SECTIONS = [
+  { id: "panorama", label: "Panorama geral" },
+  { id: "qualidade", label: "Qualidade do modelo" },
+  { id: "metodologia", label: "Metodologia" },
+  { id: "confiabilidade", label: "Confiabilidade" },
+  { id: "predicao", label: "Predição do dia seguinte" },
+] as const;
+
+// Navegação fixa: clicar leva direto à seção (âncoras + rolagem suave via CSS).
+function SectionNav() {
+  return (
+    <nav
+      aria-label="Seções"
+      className="sticky top-0 z-20 -mx-6 mb-2 mt-6 border-b border-zinc-200 bg-white/80 px-6 py-2.5 backdrop-blur dark:border-white/10 dark:bg-[#161022]/80"
+    >
+      <ul className="flex flex-wrap gap-x-4 gap-y-1 text-sm">
+        {SECTIONS.map((s) => (
+          <li key={s.id}>
+            <a
+              href={`#${s.id}`}
+              className="text-zinc-500 transition-colors hover:text-[#550899] dark:text-zinc-400 dark:hover:text-[#AC4DFF]"
+            >
+              {s.label}
+            </a>
+          </li>
+        ))}
+      </ul>
+    </nav>
+  );
 }
 
 export default async function Home({
@@ -487,42 +537,102 @@ export default async function Home({
     residualsByHour[brFields(epoch).hour].push(Math.round(real - Number(p.load_mw)));
   }
 
+  // Cartão que agrupa um par de painéis num capítulo (fundo/borda sutil).
+  const groupCard =
+    "mt-6 rounded-xl border border-zinc-200 bg-zinc-50/60 p-5 dark:border-zinc-800 dark:bg-zinc-900/40";
+
   return (
-    <main className="mx-auto flex min-h-full w-full max-w-5xl flex-col px-6 py-10">
-      <div className="mb-6">
-        <SubsystemSelector options={options} value={selected} />
-      </div>
+    <main className="mx-auto w-full max-w-5xl px-6 py-10">
+      {/* Cabeçalho da página */}
+      <header>
+        <div className="flex items-center gap-3">
+          <span className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#550899]">
+            <svg
+              viewBox="0 0 24 24"
+              className="h-6 w-6"
+              fill="#AAF766"
+              aria-hidden="true"
+            >
+              <path d="M14.615 1.595a.75.75 0 0 1 .359.852L12.982 9.75h7.268a.75.75 0 0 1 .548 1.262l-10.5 11.25a.75.75 0 0 1-1.272-.71l1.992-7.302H3.75a.75.75 0 0 1-.548-1.262l10.5-11.25a.75.75 0 0 1 .913-.143Z" />
+            </svg>
+          </span>
+          <h1 className="text-3xl font-bold tracking-tight text-zinc-900 dark:text-zinc-50">
+            Previsão de carga do Sistema Interligado Nacional
+          </h1>
+        </div>
+        <p className="mt-2 max-w-3xl text-sm text-zinc-600 dark:text-zinc-400">
+          Previsão da carga elétrica brasileira, por subsistema
+        </p>
+        <div className="mt-5">
+          <SubsystemSelector options={options} value={selected} />
+        </div>
+      </header>
 
-      {lgbm && <KpiCards metrics={lgbm} ons={ons} />}
+      <SectionNav />
 
-      <ChartSection
-        key={selected}
-        data={chartData}
-        modelAvailable={modelAvailable}
-      />
+      {/* Panorama geral */}
+      <section id="panorama" className="mt-12 scroll-mt-20">
+        <SectionHeader
+          title="Panorama geral"
+          subtitle="A carga real de cada hora, a previsão oficial do ONS e a do melhor modelo."
+        />
+        <div className="mt-6">
+          <ChartSection
+            key={selected}
+            data={chartData}
+            modelAvailable={modelAvailable}
+          />
+        </div>
+      </section>
 
-      <div className="mt-10">
-        <SubsystemsCompare data={subsystemsMape} />
-      </div>
+      {/* Qualidade do modelo */}
+      <section id="qualidade" className="mt-16 scroll-mt-20">
+        <SectionHeader
+          title="Qualidade do modelo"
+          subtitle="O resumo das três métricas principais."
+        />
+        <div className="mt-6">{lgbm && <KpiCards metrics={lgbm} ons={ons} />}</div>
+      </section>
 
-      <div className="mt-10">
-        <ComparisonPanel comparison={comparison} />
-      </div>
+      {/* Metodologia */}
+      <section id="metodologia" className="mt-16 scroll-mt-20">
+        <SectionHeader
+          title="Metodologia"
+          subtitle="A escada de modelos e comparações."
+        />
+        <div className={`${groupCard} grid gap-8 lg:grid-cols-2`}>
+          <ComparisonPanel comparison={comparison} />
+          <SubsystemsCompare data={subsystemsMape} />
+        </div>
+      </section>
 
-      <div className="mt-10">
-        <ErrorBreakdown key={selected} data={chartData} />
-      </div>
+      {/* Confiabilidade */}
+      <section id="confiabilidade" className="mt-16 scroll-mt-20">
+        <SectionHeader
+          title="Confiabilidade"
+          subtitle="Auditoria do modelo: onde o erro se concentra e como ele se distribui."
+        />
+        <div className={`${groupCard} space-y-8`}>
+          <ErrorBreakdown key={`erro-${selected}`} data={chartData} />
+          <ResidualsHistogram key={`hist-${selected}`} data={chartData} />
+        </div>
+      </section>
 
-      <div className="mt-10">
-        <ResidualsHistogram key={selected} data={chartData} />
-      </div>
-
-      <LiveForecast
-        subsystem={selected}
-        targetDate={targetDate}
-        realByTs={realByTs}
-        residualsByHour={residualsByHour}
-      />
+      {/* Predição do dia seguinte */}
+      <section id="predicao" className="mt-16 scroll-mt-20">
+        <SectionHeader
+          title="Predição do dia seguinte"
+          subtitle="A previsão para o dia seguinte calculada na hora pelo modelo Ridge, com a faixa de confiança."
+        />
+        <div className="mt-6">
+          <LiveForecast
+            subsystem={selected}
+            targetDate={targetDate}
+            realByTs={realByTs}
+            residualsByHour={residualsByHour}
+          />
+        </div>
+      </section>
     </main>
   );
 }

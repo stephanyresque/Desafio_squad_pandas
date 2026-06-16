@@ -19,9 +19,9 @@ export type SubsystemMape = {
   ons: number | null;
 };
 
-const MODEL_COLOR = "#7c3aed"; // violeta — coerente com a linha do modelo no gráfico principal
-const ONS_COLOR = "#f59e0b"; // laranja — coerente com a programada ONS
-const WIN_COLOR = "#10b981"; // emerald — mesmo destaque de "melhor" da tabela
+const MODEL_COLOR = "#AC4DFF"; // roxo — coerente com a linha do modelo no gráfico principal
+const ONS_COLOR = "#FF6A00"; // laranja — coerente com a programada ONS
+const WIN_COLOR = "#AAF766"; // verde claro — destaque do vencedor (maior valor em foco)
 
 function pct(value: number): string {
   return `${value.toLocaleString("pt-BR", {
@@ -58,10 +58,10 @@ export default function SubsystemsCompare({ data }: { data: SubsystemMape[] }) {
   const wins = comparable.filter((d) => (d.lgbm as number) < (d.ons as number));
   const summary =
     wins.length > 0
-      ? `Nosso modelo supera o ONS em ${wins.length} das ${comparable.length} regiões (${listPt(
+      ? `O modelo supera o ONS em ${wins.length} das ${comparable.length} regiões (${listPt(
           wins.map((d) => d.nome),
         )}).`
-      : `Nas ${comparable.length} regiões avaliadas, a programada do ONS ainda tem MAPE menor que o nosso modelo.`;
+      : `Nas ${comparable.length} regiões avaliadas, a programada do ONS ainda tem MAPE menor que o do modelo.`;
 
   return (
     <section>
@@ -69,9 +69,9 @@ export default function SubsystemsCompare({ data }: { data: SubsystemMape[] }) {
         Comparativo dos subsistemas
       </h2>
       <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
-        MAPE do melhor modelo (LightGBM) × programada ONS nas 4 regiões — backtest de 12
-        meses. Usamos só o MAPE porque, sendo percentual, é comparável entre regiões de
-        tamanhos muito diferentes (N ~8 GW, SE/CO ~45 GW).
+        MAPE do melhor modelo (LightGBM) × programada ONS nas 4 regiões, no teste
+        retroativo de 12 meses. Só o MAPE é usado porque, sendo percentual, é comparável
+        entre regiões de tamanhos muito diferentes (N ~8 GW, SE/CO ~45 GW).
       </p>
 
       <p className="mt-3 text-sm text-zinc-700 dark:text-zinc-300">{summary}</p>

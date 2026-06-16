@@ -14,9 +14,9 @@ import {
 
 import { type LoadChartPoint } from "./load-chart";
 
-const MODEL_COLOR = "#7c3aed"; // violeta — barras (resíduos do modelo)
+const MODEL_COLOR = "#AC4DFF"; // roxo — barras (resíduos do modelo)
 const ZERO_COLOR = "#52525b"; // zinc — linha do zero
-const MEAN_COLOR = "#e11d48"; // rose — linha da média (viés)
+const MEAN_COLOR = "#FF6A00"; // laranja — linha da média (viés)
 
 const BINS = 41; // ímpar → uma faixa centrada no zero
 
@@ -103,12 +103,12 @@ export default function ResidualsHistogram({ data }: { data: LoadChartPoint[] })
         Distribuição dos erros
       </h2>
       <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
-        Resíduos do modelo (LightGBM) ao longo do backtest: resíduo = real − previsto, em
+        Resíduos do modelo (LightGBM) ao longo do teste retroativo: resíduo = real − previsto, em
         MWmed e com sinal (positivo = o modelo subestimou; negativo = superestimou).
       </p>
       <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
         Erros concentrados em torno de zero e simétricos indicam um modelo sem viés
-        sistemático — ele não tende a errar sempre para o mesmo lado.
+        sistemático: ele não tende a errar sempre para o mesmo lado.
       </p>
 
       <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3">

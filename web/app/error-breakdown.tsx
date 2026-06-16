@@ -17,8 +17,8 @@ import {
 import { brFields } from "@/lib/forecast/features";
 import { type LoadChartPoint } from "./load-chart";
 
-const MODEL_COLOR = "#7c3aed"; // violeta — modelo (LightGBM)
-const ONS_COLOR = "#f59e0b"; // laranja — programada ONS
+const MODEL_COLOR = "#AC4DFF"; // roxo — modelo (LightGBM)
+const ONS_COLOR = "#FF6A00"; // laranja — programada ONS
 
 // Feriados (horário de Brasília). Array de 'YYYY-MM-DD' fácil de editar.
 // Feriado tem prioridade sobre fim de semana / dia útil.
@@ -140,7 +140,7 @@ export default function ErrorBreakdown({ data }: { data: LoadChartPoint[] }) {
       </h2>
       <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
         Erro do modelo (LightGBM) × programada ONS, recortado por hora do dia e por tipo
-        de dia (backtest, horário de Brasília). Em geral o erro cresce nas horas de rampa
+        de dia (teste retroativo, horário de Brasília). Em geral o erro cresce nas horas de rampa
         (manhã e início da noite) e em dias atípicos.
       </p>
 
@@ -220,7 +220,7 @@ export default function ErrorBreakdown({ data }: { data: LoadChartPoint[] }) {
                 {t.name} {t.dias}
               </span>
             ))}
-            . Feriado tem poucos dias — leia com cautela.
+            . Feriado tem poucos dias, leia com cautela.
           </p>
         </div>
       </div>

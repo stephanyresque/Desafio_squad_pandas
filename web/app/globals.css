@@ -14,13 +14,59 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --background: #0a0a0a;
+    /* roxo bem escuro (em vez de preto puro) para ficar dentro da paleta */
+    --background: #161022;
     --foreground: #ededed;
   }
+}
+
+html {
+  scroll-behavior: smooth;
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
+}
+
+/* Legibilidade dos textos/grade dos gráficos Recharts nos dois temas.
+   Sobrescreve as cores fixas dos componentes (claras demais p/ o modo escuro). */
+.recharts-cartesian-axis-tick-value,
+.recharts-cartesian-axis-label,
+.recharts-label {
+  fill: #52525b !important; /* zinc-600 — legível no claro */
+}
+.recharts-cartesian-grid line {
+  stroke: #e4e4e7 !important; /* zinc-200 */
+}
+@media (prefers-color-scheme: dark) {
+  .recharts-cartesian-axis-tick-value,
+  .recharts-cartesian-axis-label,
+  .recharts-label {
+    fill: #a1a1aa !important; /* zinc-400 — legível no escuro */
+  }
+  .recharts-cartesian-grid line {
+    stroke: #3f3f46 !important; /* zinc-700 — grade sutil no escuro */
+  }
+}
+
+/* Tooltips padrão do Recharts: fundo branco fixo + rótulo cinza claro ficam
+   ilegíveis no modo escuro. Deixamos o tooltip dentro da paleta. */
+.recharts-default-tooltip {
+  background-color: #ffffff !important;
+  border: 1px solid #e4e4e7 !important;
+  border-radius: 8px !important;
+}
+.recharts-tooltip-label {
+  color: #3f3f46 !important; /* rótulo legível no claro */
+}
+@media (prefers-color-scheme: dark) {
+  .recharts-default-tooltip {
+    background-color: #241a38 !important; /* roxo escuro elevado */
+    border-color: #3a2d52 !important;
+  }
+  .recharts-tooltip-label {
+    color: #e4e4e7 !important; /* rótulo legível no escuro */
+  }
 }
