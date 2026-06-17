@@ -1,10 +1,7 @@
 // Engenharia de features em TS — espelha EXATAMENTE pipeline/model.py (build_features).
+// É a ÚNICA fonte usada pela rota /api/forecast e pelo teste de paridade.
 // PISO DE 24h: para a hora-alvo t, nenhuma feature de carga toca dado em (t−24h, t].
-// Esta lógica é a ÚNICA fonte: a rota /api/forecast e o teste de paridade a usam.
-//
-// Tempo: Brasília é UTC−3 FIXO (sem horário de verão). Representamos cada instante por
-// epoch ms e derivamos os campos de calendário deslocando −3h e lendo os campos UTC —
-// assim o resultado independe do fuso da máquina.
+// Tempo: Brasília é UTC−3 fixo; derivamos o calendário deslocando −3h sobre o epoch.
 
 export const HOUR_MS = 60 * 60 * 1000;
 const BR_OFFSET_MS = 3 * HOUR_MS;

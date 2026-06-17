@@ -1,17 +1,10 @@
-"""Ingestão genérica de carga ONS (semi-horária) → tabela horária no Supabase.
+"""Ingestão de carga ONS (semi-horária) → tabela horária no Supabase.
 
-Parametrizado por tipo ("verificada" | "programada"):
-  - verificada → endpoint cargaverificada, campo val_cargaglobal,            tabela load_actual
-  - programada → endpoint cargaprogramada, campo val_cargaglobalprogramada,   tabela load_official_forecast
+Parametrizado por tipo: "verificada" → load_actual; "programada" →
+load_official_forecast. Varre o intervalo em blocos mensais com upsert
+idempotente. Regras de tratamento dos dados no README.
 
-Tratamento (igual para os dois tipos, ver .claude/rules/010-fonte-dados-ons.md):
-  - agrega semi-horário → horário (média das 2 semi-horas);
-  - descarta val = 0/null (não-medição) — horas faltantes ficam EXPLÍCITAS, sem inventar;
-  - instante em Brasília (UTC−3 fixo); a hora-rótulo contém o INÍCIO do intervalo;
-  - upsert idempotente ON CONFLICT (subsystem_id, ts).
-
-Para backfill longo, o intervalo é varrido em blocos MENSAIS (um request por mês),
-com upsert a cada bloco — não estoura o limite de janela da API e é retomável.
+Uso: via os wrappers ingest_verificada.py / ingest_programada.py.
 """
 
 from __future__ import annotations

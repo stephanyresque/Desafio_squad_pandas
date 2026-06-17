@@ -1,5 +1,5 @@
 // Teste de paridade Python ↔ TS.
-// Lê pipeline/parity_cases.json (features + yhat de referência, com o histórico embutido),
+// Lê pipeline/data/parity_cases.json (features + yhat de referência, com o histórico embutido),
 // recomputa as features e o yhat pela MESMA lógica TS usada na rota /api/forecast, e afirma
 // que cada feature e cada yhat batem com o Python. Tolerância apertada (rel < 1e-6 OU abs < 0.01).
 // Se qualquer caso divergir, o processo falha (exit 1) apontando feature/caso.
@@ -26,7 +26,7 @@ type ParityFile = { artifact: ServedArtifact; cases: ParityCase[] };
 
 const here = dirname(fileURLToPath(import.meta.url));
 const parity = JSON.parse(
-  readFileSync(resolve(here, "../../pipeline/parity_cases.json"), "utf8"),
+  readFileSync(resolve(here, "../../pipeline/data/parity_cases.json"), "utf8"),
 ) as ParityFile;
 // MESMA lista de feriados que a rota usa (cópia em web/lib/forecast).
 const holidays = JSON.parse(

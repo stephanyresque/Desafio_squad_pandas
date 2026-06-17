@@ -1,28 +1,11 @@
-"""Backtest walk-forward do subsistema SECO: Ridge × LightGBM × ingênuo sazonal × programada ONS.
+"""Treino e teste retroativo dos modelos de carga por subsistema.
 
-PRIORIDADE ABSOLUTA: zero vazamento. Toda feature de carga respeita o PISO DE 24h —
-para prever a hora-alvo t, nenhuma feature toca dado no intervalo (t−24h, t]; só t−24h
-ou antes. O calendário é determinístico (não vaza). Nada é normalizado sobre o dataset
-inteiro: o StandardScaler do Ridge é reajustado no treino de CADA origem.
+Backtest walk-forward de Ridge e LightGBM contra os baselines (ingênuo sazonal
+e programada ONS); grava model_runs, predictions, evaluations e o artifact do
+Ridge servido para a /api/forecast. Método detalhado nos comentários de seção
+e no README.
 
-Ridge e LightGBM compartilham EXATAMENTE a mesma matriz de features e o mesmo protocolo
-walk-forward (origens mensais, janela expansível, treina com alvos < O). Só o estimador
-muda. Os 4 preditores são avaliados nas MESMAS horas — única forma de a comparação ser justa.
-
-Walk-forward day-ahead, janela EXPANSÍVEL, re-treino mensal:
-  - corte inicial: treino 2024-06-01..2025-05-31, teste a partir de 2025-06-01;
-  - origens de re-treino = início de cada mês do teste;
-  - em cada origem O treina com alvos ESTRITAMENTE < O (nenhuma hora prevista é vista no
-    treino) e prevê [O, próxima O).
-
-Grava 3 model_runs:
-  - ridge_v1     (backtest): predictions do ridge + evaluations ridge/naive/ons;
-  - lgbm_v1      (backtest): predictions do lgbm  + evaluations lgbm;
-  - ridge_v1_served:         artifact JSON do Ridge treinado em TODO o histórico (p/ a
-                             /api/forecast servir em TS). Sem predictions/evaluations.
-Idempotente: remove runs anteriores desses 3 nomes (e filhos) antes de inserir.
-
-Uso: python pipeline/model.py
+Uso: python pipeline/src/model.py
 """
 
 from __future__ import annotations
@@ -37,8 +20,6 @@ import warnings
 from datetime import datetime, timedelta, timezone
 from typing import Callable
 
-# LightGBM treina/prevê com arrays numpy (sem nomes de coluna) — silencia o aviso cosmético
-# do sklearn sobre feature names; não afeta valores.
 warnings.filterwarnings("ignore", message="X does not have valid feature names")
 
 import holidays
@@ -56,13 +37,10 @@ BRASILIA = timezone(timedelta(hours=-3))
 DEFAULT_CODIGO = "SECO"
 HORIZON_H = 24
 
-# Nomes de run são SUFIXADOS pelo subsistema (ex.: ridge_v1_SECO, ridge_v1_S) — um modelo
-# por subsistema. Sem isso, treinar o S sobrescreveria/apagaria os runs do SECO (model_runs
-# não tem coluna de subsistema; a idempotência e a /api/forecast casam pelo model_name).
 RIDGE_BASE = "ridge_v1"
 LGBM_BASE = "lgbm_v1"
 SERVED_BASE = "ridge_v1_served"
-# Só este subsistema emite os arquivos de referência de paridade (parity_cases.json).
+
 PARITY_CODIGO = "SECO"
 
 RIDGE_ALPHA = 1.0
@@ -206,7 +184,8 @@ def build_features(actual: pd.Series) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# Walk-forward (genérico no estimador)
+# Walk-forward day-ahead: origens mensais, janela expansível, treino com alvos
+# estritamente < O (origem). Mesmo `valid` p/ todos os estimadores → mesmas horas.
 # ---------------------------------------------------------------------------
 def make_ridge():
     return make_pipeline(StandardScaler(), Ridge(alpha=RIDGE_ALPHA))
@@ -293,7 +272,8 @@ def fit_served_ridge(
 # ---------------------------------------------------------------------------
 # Casos de referência p/ paridade TS (emitidos junto do served ridge)
 # ---------------------------------------------------------------------------
-PIPELINE_DIR = pathlib.Path(__file__).resolve().parent
+# Artefatos JSON ficam em pipeline/data/ (este módulo vive em pipeline/src/).
+DATA_DIR = pathlib.Path(__file__).resolve().parent.parent / "data"
 
 
 def build_history_for_target(actual: pd.Series, t: pd.Timestamp) -> dict[str, float]:
@@ -365,13 +345,14 @@ def emit_reference_files(
         "feature_order": artifact["features"],
         "cases": cases,
     }
-    (PIPELINE_DIR / "parity_cases.json").write_text(
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    (DATA_DIR / "parity_cases.json").write_text(
         json.dumps(parity, indent=2), encoding="utf-8"
     )
 
     br = br_holidays_for_index(actual.index)
     dates = sorted(d.isoformat() for d in br.keys())
-    (PIPELINE_DIR / "holidays_br.json").write_text(
+    (DATA_DIR / "holidays_br.json").write_text(
         json.dumps(dates, indent=2), encoding="utf-8"
     )
     return len(cases), len(dates)
@@ -661,8 +642,8 @@ def main() -> None:
         )
         if n_cases:
             print(
-                f"Referência p/ paridade TS: pipeline/parity_cases.json ({n_cases} casos) | "
-                f"pipeline/holidays_br.json ({n_holidays} feriados)"
+                f"Referência p/ paridade TS: pipeline/data/parity_cases.json ({n_cases} casos) | "
+                f"pipeline/data/holidays_br.json ({n_holidays} feriados)"
             )
     finally:
         conn.close()
