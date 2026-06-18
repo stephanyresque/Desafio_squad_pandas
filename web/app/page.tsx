@@ -9,6 +9,10 @@ import KpiCards, { type MetricTriple } from "./kpi-cards";
 import SubsystemsCompare, { type SubsystemMape } from "./subsystems-compare";
 import ErrorBreakdown from "./error-breakdown";
 import ResidualsHistogram from "./residuals-histogram";
+import TemperatureSensitivity, {
+  type WeatherSensitivity,
+} from "./temperature-sensitivity";
+import SensitivityMap, { type MapSensitivity } from "./sensitivity-map";
 
 export const dynamic = "force-dynamic";
 
@@ -198,6 +202,75 @@ async function fetchComparison(
     horizonH = row.horizon_h;
   }
   return { byPredictor, horizonH };
+}
+
+// Sensibilidade da carga à temperatura (1 linha por subsistema, weather_sensitivity).
+async function fetchWeatherSensitivity(
+  supabase: ReturnType<typeof createClient>,
+  codigo: string,
+): Promise<WeatherSensitivity | null> {
+  const { data } = await supabase
+    .from("weather_sensitivity")
+    .select(
+      "balance_c, slope_cool_mw_per_c, slope_heat_mw_per_c, intercept_mw, r2, n_days, mean_load_mw, curve, subsystems!inner(codigo)",
+    )
+    .eq("subsystems.codigo", codigo)
+    .maybeSingle();
+
+  if (!data) return null;
+  const row = data as unknown as {
+    balance_c: number | string;
+    slope_cool_mw_per_c: number | string;
+    slope_heat_mw_per_c: number | string;
+    intercept_mw: number | string;
+    r2: number | string | null;
+    n_days: number;
+    mean_load_mw: number | string | null;
+    curve: { temp: number; observed: number; fitted: number; n: number }[];
+  };
+
+  return {
+    balance_c: Number(row.balance_c),
+    slope_cool: Number(row.slope_cool_mw_per_c),
+    slope_heat: Number(row.slope_heat_mw_per_c),
+    intercept: Number(row.intercept_mw),
+    r2: row.r2 == null ? null : Number(row.r2),
+    n_days: row.n_days,
+    mean_load: row.mean_load_mw == null ? null : Number(row.mean_load_mw),
+    curve: row.curve ?? [],
+  };
+}
+
+// Sensibilidade dos 4 subsistemas de uma vez (para o mapa, independe do dropdown).
+async function fetchAllWeatherSensitivity(
+  supabase: ReturnType<typeof createClient>,
+): Promise<MapSensitivity[]> {
+  const { data } = await supabase
+    .from("weather_sensitivity")
+    .select(
+      "slope_cool_mw_per_c, slope_heat_mw_per_c, mean_load_mw, subsystems!inner(codigo, nome)",
+    );
+
+  const rows = (data ?? []) as unknown as {
+    slope_cool_mw_per_c: number | string;
+    slope_heat_mw_per_c: number | string;
+    mean_load_mw: number | string | null;
+    subsystems: JoinedSub | JoinedSub[];
+  }[];
+
+  const out: MapSensitivity[] = [];
+  for (const row of rows) {
+    const sub = normalizeJoined(row.subsystems);
+    if (!sub) continue;
+    out.push({
+      codigo: sub.codigo,
+      nome: sub.nome,
+      slope_cool_mw_per_c: Number(row.slope_cool_mw_per_c),
+      slope_heat_mw_per_c: Number(row.slope_heat_mw_per_c),
+      mean_load_mw: row.mean_load_mw == null ? 0 : Number(row.mean_load_mw),
+    });
+  }
+  return out;
 }
 
 // MAPE (lgbm × ons) dos 4 subsistemas de uma vez — para o painel comparativo
@@ -427,6 +500,7 @@ const SECTIONS = [
   { id: "qualidade", label: "Qualidade do modelo" },
   { id: "metodologia", label: "Metodologia" },
   { id: "confiabilidade", label: "Confiabilidade" },
+  { id: "sensibilidade", label: "Sensibilidade à temperatura" },
   { id: "predicao", label: "Previsão do dia" },
 ] as const;
 
@@ -478,6 +552,8 @@ export default async function Home({
     modelRows,
     subsystemsMape,
     ridgeRows,
+    weatherSensitivity,
+    allSensitivity,
   ] = await Promise.all([
     fetchComparison(supabase, selected),
     supabase
@@ -496,6 +572,10 @@ export default async function Home({
     fetchSubsystemsMape(supabase),
     // Previsões de BACKTEST do Ridge — base da banda de incerteza da previsão ao vivo.
     fetchModelPredictions(supabase, ridgeName),
+    // Sensibilidade da carga à temperatura (weather_sensitivity) do subsistema.
+    fetchWeatherSensitivity(supabase, selected),
+    // Sensibilidade dos 4 subsistemas (para o mapa).
+    fetchAllWeatherSensitivity(supabase),
   ]);
 
   // Janela do gráfico = [min, max] das previsões do modelo (sem hardcode). Real e
@@ -616,6 +696,18 @@ export default async function Home({
           <ErrorBreakdown key={`erro-${selected}`} data={chartData} />
           <ResidualsHistogram key={`hist-${selected}`} data={chartData} />
         </div>
+      </section>
+
+      {/* Sensibilidade à temperatura */}
+      <section id="sensibilidade" className="mt-16 scroll-mt-20">
+        <SectionHeader
+          title="Sensibilidade à temperatura"
+          subtitle="Quanto a carga responde ao calor e ao frio."
+        />
+        <div className="mt-6">
+          <SensitivityMap data={allSensitivity} selected={selected} />
+        </div>
+        <TemperatureSensitivity subsystem={selected} data={weatherSensitivity} />
       </section>
 
       {/* Predição do dia seguinte */}
