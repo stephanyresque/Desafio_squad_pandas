@@ -111,14 +111,9 @@ export default function LiveForecast({
           disabled={state.kind === "loading"}
           className="rounded-md bg-[#550899] px-3 py-1.5 text-sm font-medium text-white hover:bg-[#6b15b0] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#AC4DFF] disabled:opacity-50"
         >
-          {state.kind === "loading"
-            ? "Gerando…"
-            : "Gerar previsão do dia seguinte"}
+          {state.kind === "loading" ? "Gerando…" : "Gerar previsão do dia"}
         </button>
       </div>
-      <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
-        Dia seguinte ao último dado disponível do ONS; calculado pelo modelo Ridge.
-      </p>
 
       {state.kind === "loading" && (
         <p className="mt-4 text-sm text-zinc-500 dark:text-zinc-400">

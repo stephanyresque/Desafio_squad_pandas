@@ -374,18 +374,18 @@ function toTriple(m: Record<string, number> | undefined): MetricTriple | null {
   return { mape: m.mape, mae: m.mae, rmse: m.rmse };
 }
 
-// ---------------------------------------------------------------------------
-// Dia ancorado da previsão ao vivo = o ÚLTIMO dia COMPLETO de verificada (não o
-// seguinte). Assim há carga real para sobrepor previsto × real. Continua day-ahead
-// sem vazamento: a rota /api/forecast só usa features com piso de 24h (≤ fim de D−1).
-// ---------------------------------------------------------------------------
+// Dia ancorado da previsão ao vivo = o dia SEGUINTE ao último dia COMPLETO de
+// verificada. É uma previsão de verdade do dia à frente; o real que já chegou
+// (a manhã) sobrepõe parcialmente. Sem vazamento: a /api/forecast só usa
+// features com piso de 24h (≤ fim do último dia completo).
 function anchoredForecastDate(maxActualTs: string | null): string | null {
   if (!maxActualTs) return null;
   const maxEpoch = Date.parse(maxActualTs);
   const f = brFields(maxEpoch);
   let lastComplete = brEpoch(f.year, f.month, f.day, 0); // meia-noite do dia do maxTs
   if (f.hour < 23) lastComplete -= 24 * HOUR_MS; // dia ainda incompleto → usa o anterior
-  return brHourKey(lastComplete).slice(0, 10);
+  const target = lastComplete + 24 * HOUR_MS; // prevê o dia SEGUINTE ao último completo
+  return brHourKey(target).slice(0, 10);
 }
 
 // Carga verificada (real) das 24h do dia ancorado, indexada pela hora-rótulo
@@ -427,7 +427,7 @@ const SECTIONS = [
   { id: "qualidade", label: "Qualidade do modelo" },
   { id: "metodologia", label: "Metodologia" },
   { id: "confiabilidade", label: "Confiabilidade" },
-  { id: "predicao", label: "Predição do dia seguinte" },
+  { id: "predicao", label: "Previsão do dia" },
 ] as const;
 
 // Navegação fixa: clicar leva direto à seção (âncoras + rolagem suave via CSS).
@@ -621,8 +621,8 @@ export default async function Home({
       {/* Predição do dia seguinte */}
       <section id="predicao" className="mt-16 scroll-mt-20">
         <SectionHeader
-          title="Predição do dia seguinte"
-          subtitle="A previsão para o dia seguinte calculada na hora pelo modelo Ridge, com a faixa de confiança."
+          title="Previsão do dia"
+          subtitle="Calculada na hora pelo modelo Ridge, com a faixa de confiança."
         />
         <div className="mt-6">
           <LiveForecast

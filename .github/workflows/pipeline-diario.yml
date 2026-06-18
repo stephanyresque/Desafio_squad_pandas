@@ -2,8 +2,8 @@ name: pipeline diario
 
 on:
   schedule:
-    - cron: "0 10 * * *"    
-  workflow_dispatch:        
+    - cron: "0 10 * * *"
+  workflow_dispatch:
 
 jobs:
   ingestao:
@@ -20,9 +20,12 @@ jobs:
       - name: Instala dependencias
         run: pip install -r pipeline/requirements.txt
 
-      - name: Ingestao da janela movel (verificada + programada)
+      - name: Ingestao da janela movel (verificada + programada) — 4 subsistemas
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: |
-          python pipeline/ingest_verificada.py
-          python pipeline/ingest_programada.py
+          for cod in SECO S NE N; do
+            echo "== Ingerindo $cod =="
+            python pipeline/ingest_verificada.py --codigo "$cod"
+            python pipeline/ingest_programada.py --codigo "$cod"
+          done
