@@ -27,4 +27,5 @@ jobs:
           for cod in SECO S NE N; do
             echo "== Modelo $cod =="
             python -m src.model --codigo "$cod"
+          done
         working-directory: pipeline
